@@ -1,0 +1,99 @@
+__version__ = "0.1.0"
+__author__ = "Stefan Cordes"
+__email__ = "stefan@alumni.Princeton.edu"
+
+# contrasts
+from .contrasts import (
+    coef_name_for_motif_phenotype,
+    motif_diff_between_phenotypes,
+    wald_contrast,
+)
+
+# diagnostics
+from .diagnostics import (
+    estimate_alpha_nb2_moments,
+    per_sample_dispersion,
+    poisson_overdispersion_test,
+    zero_fraction,
+)
+
+# features
+from .features import (
+    build_elm_design,
+    make_patsy_safe_columns,
+    split_elm_list,
+)
+
+# io
+from .io import (
+    Paths,
+    load_candidate_metadata,
+    load_counts_matrix,
+    load_sample_metadata,
+    parse_samples_from_columns,
+    write_sample_metadata_template,
+)
+
+# metadata_setup
+from .metadata_setup import (
+    CandidateMergeSpec,
+    SampleParseSpec,
+    build_elm_category_design,
+    merge_candidate_metadata,
+    sample_metadata_from_counts_xlsx,
+    split_sample_id,
+)
+
+# model
+from .model import (
+    FitResult,
+    build_joint_formula,
+    fit_nb_glm_iter_alpha,
+)
+
+# preprocess
+from .preprocess import (
+    add_library_size,
+    counts_to_long,
+    filter_domains_by_total_counts,
+    make_block_id,
+)
+
+__all__ = [
+    # contrasts
+    "coef_name_for_motif_phenotype",
+    "motif_diff_between_phenotypes",
+    "wald_contrast",
+    # diagnostics
+    "estimate_alpha_nb2_moments",
+    "per_sample_dispersion",
+    "poisson_overdispersion_test",
+    "zero_fraction",
+    # features
+    "build_elm_design",
+    "make_patsy_safe_columns",
+    "split_elm_list",
+    # io
+    "Paths",
+    "load_candidate_metadata",
+    "load_counts_matrix",
+    "load_sample_metadata",
+    "parse_samples_from_columns",
+    "write_sample_metadata_template",
+    # metadata_setup
+    "CandidateMergeSpec",
+    "SampleParseSpec",
+    "build_elm_category_design",
+    "merge_candidate_metadata",
+    "sample_metadata_from_counts_xlsx",
+    "split_sample_id",
+    # model
+    "FitResult",
+    "build_joint_formula",
+    "fit_nb_glm_iter_alpha",
+    # preprocess
+    "add_library_size",
+    "counts_to_long",
+    "filter_domains_by_total_counts",
+    "make_block_id",
+]

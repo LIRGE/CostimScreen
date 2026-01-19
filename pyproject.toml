@@ -1,0 +1,17 @@
+[project]
+name = "costim-screen"
+version = "0.1.0"
+description = "Re-analysis toolkit for pooled CAR costim screens"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.0",
+  "numpy>=1.24",
+  "openpyxl>=3.1",
+  "statsmodels>=0.14",
+  "patsy>=0.5",
+  "scipy>=1.10"
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
