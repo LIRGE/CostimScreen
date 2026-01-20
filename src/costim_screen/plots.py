@@ -1,12 +1,22 @@
-# src/costim_screen/plots.py
+"""
+Visualization functions for screening results.
+
+This module provides plotting functions for visualizing differential motif
+effects, including volcano plots for displaying effect sizes and significance.
+
+Functions
+---------
+volcano_plot
+    Create a volcano plot of log fold change vs significance.
+"""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
 
 def volcano_plot(
@@ -23,15 +33,61 @@ def volcano_plot(
     outpath: Optional[str | Path] = None,
     dpi: int = 200,
 ):
-    """
-    Basic volcano plot: log2FC vs -log10(qvalue).
+    """Create a volcano plot of log fold change vs significance.
 
-    By default:
-      - labels top_n_labels most significant points (smallest qvalue)
-      - draws threshold lines at q_thresh and +/- lfc_thresh
-      - saves if outpath is provided
+    Generates a scatter plot with log fold change on the x-axis and
+    -log10(q-value) on the y-axis. Optionally labels the most significant
+    points and draws threshold lines.
 
-    Returns (fig, ax).
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing contrast results (from :func:`motif_contrast_table`).
+    x_col : str, default "logFC"
+        Column name for x-axis values (log fold change).
+    y_col : str, default "neglog10_q"
+        Column name for y-axis values (-log10 q-value).
+    label_col : str, default "motif"
+        Column name for point labels.
+    q_col : str, default "qvalue"
+        Column name for q-values (used to select top labels).
+    q_thresh : float, default 0.10
+        Q-value significance threshold. A horizontal line is drawn at
+        -log10(q_thresh).
+    lfc_thresh : float, default 1.0
+        Log fold change threshold. Vertical lines are drawn at
+        +/- lfc_thresh.
+    title : str or None, default None
+        Plot title.
+    top_n_labels : int, default 10
+        Number of most significant points to label.
+    outpath : str, Path, or None, default None
+        If provided, save the figure to this path.
+    dpi : int, default 200
+        Resolution for saved figure.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        The matplotlib figure object.
+    ax : matplotlib.axes.Axes
+        The matplotlib axes object.
+
+    Raises
+    ------
+    ValueError
+        If the input DataFrame is empty.
+
+    Examples
+    --------
+    >>> result = motif_contrast_table(fit, motifs, p="EM_High", q="CM_High")
+    >>> fig, ax = volcano_plot(
+    ...     result,
+    ...     q_thresh=0.10,
+    ...     lfc_thresh=1.0,
+    ...     title="EM vs CM",
+    ...     outpath="volcano.png"
+    ... )
     """
     if df.empty:
         raise ValueError("volcano_plot received an empty DataFrame.")
@@ -55,7 +111,11 @@ def volcano_plot(
 
     # Label top N by qvalue (and finite)
     if top_n_labels and q_col in df.columns:
-        sub = df[np.isfinite(df[q_col])].sort_values(q_col, ascending=True).head(int(top_n_labels))
+        sub = (
+            df[np.isfinite(df[q_col])]
+            .sort_values(q_col, ascending=True)
+            .head(int(top_n_labels))
+        )
         for _, r in sub.iterrows():
             ax.text(float(r[x_col]), float(r[y_col]), str(r[label_col]), fontsize=8)
 

@@ -1,7 +1,26 @@
+"""
+Negative binomial GLM fitting with iterative dispersion estimation.
+
+This module provides the core statistical modeling functionality, including
+building the joint GLM formula and fitting negative binomial models with
+iteratively estimated dispersion parameters.
+
+Functions
+---------
+build_joint_formula
+    Construct a patsy formula for the joint motif-phenotype model.
+fit_nb_glm_iter_alpha
+    Fit a negative binomial GLM with iterative alpha estimation.
+
+Classes
+-------
+FitResult
+    Container for fitted model results.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -13,22 +32,49 @@ from .diagnostics import estimate_alpha_nb2_moments
 
 @dataclass
 class FitResult:
+    """Container for fitted negative binomial GLM results."""
+
+    #: The fitted GLM results object from statsmodels.
     res: sm.GLM
+    #: The estimated dispersion parameter (NB2 parameterization).
     alpha: float
+    #: The patsy formula string used for fitting.
     formula: str
+    #: Column names from the design matrix, used for contrast construction.
     data_cols: list[str]
 
 
 def build_joint_formula(motif_cols: list[str]) -> str:
-    """
-    Joint model, no intercept:
-      - phenotype-specific intercepts: 0 + C(phenotype)
-      - block fixed effects: C(block)
-      - motif effects varying by phenotype: motif:C(phenotype)
+    """Construct a patsy formula for the joint motif-phenotype model.
+
+    Creates a formula string for a negative binomial GLM with:
+    - Phenotype-specific intercepts (no global intercept)
+    - Block fixed effects for batch correction
+    - Motif effects that vary by phenotype (interactions)
+
+    The model structure is::
+
+        count ~ 0 + C(phenotype) + C(block) + motif1:C(phenotype) + motif2:C(phenotype) + ...
+
+    Parameters
+    ----------
+    motif_cols : list of str
+        Names of the motif/ELM feature columns to include as predictors.
+
+    Returns
+    -------
+    str
+        Patsy formula string.
+
+    Examples
+    --------
+    >>> formula = build_joint_formula(["ELM_SH3", "ELM_SUMO"])
+    >>> print(formula)
+    count ~ 0 + C(phenotype) + C(block) + ELM_SH3:C(phenotype) + ELM_SUMO:C(phenotype)
     """
     # interactions for each motif
     inter = " + ".join([f"{m}:C(phenotype)" for m in motif_cols])
-    formula = f"count ~ 0 + C(phenotype) + C(block)"
+    formula = "count ~ 0 + C(phenotype) + C(block)"
     if inter:
         formula += " + " + inter
     return formula
@@ -43,30 +89,53 @@ def fit_nb_glm_iter_alpha(
     cluster_col: Optional[str] = "block",
     regularization: float = 0.0,
 ) -> FitResult:
-    """
-    Iteratively estimate NB2 alpha by moments:
-      1) fit GLM NB with current alpha
-      2) update alpha from y, mu
-      3) repeat
+    """Fit a negative binomial GLM with iterative dispersion estimation.
+
+    Fits a negative binomial GLM (NB2 parameterization) using an iterative
+    procedure to estimate the dispersion parameter alpha:
+
+    1. Fit GLM with current alpha
+    2. Update alpha using method-of-moments from residuals
+    3. Repeat until convergence
+
+    The NB2 variance function is: Var(Y) = mu + alpha * mu^2
 
     Parameters
     ----------
     df : pd.DataFrame
-        Data frame with count data and covariates.
+        Long-format data with count, phenotype, block, offset, and motif columns.
     formula : str
-        Patsy formula string.
-    offset_col : str
-        Column name for the offset (log library size).
-    max_iter : int
+        Patsy formula string (see :func:`build_joint_formula`).
+    offset_col : str, default "offset"
+        Name of the column containing log library sizes.
+    max_iter : int, default 8
         Maximum iterations for alpha estimation.
-    alpha_init : float
-        Initial dispersion parameter.
-    cluster_col : str | None
-        Column for cluster-robust standard errors.
-    regularization : float
-        L2 regularization strength (0 = no regularization).
+    alpha_init : float, default 0.1
+        Initial dispersion parameter value.
+    cluster_col : str or None, default "block"
+        Column name for cluster-robust standard errors. If None, uses
+        standard (non-robust) SEs.
+    regularization : float, default 0.0
+        L2 regularization strength. If > 0, uses regularized fitting
+        (cluster-robust SEs not available with regularization).
 
-    Returns robustcov results if cluster_col is provided.
+    Returns
+    -------
+    FitResult
+        Fitted model results including the GLM object, estimated alpha,
+        formula, and design matrix column names.
+
+    Notes
+    -----
+    If the standard fit fails due to numerical issues, the function
+    automatically falls back to L2 regularization with alpha=0.01.
+
+    Examples
+    --------
+    >>> formula = build_joint_formula(motif_cols)
+    >>> fit = fit_nb_glm_iter_alpha(df, formula, offset_col="offset")
+    >>> print(f"Dispersion: {fit.alpha:.3f}")
+    Dispersion: 1.152
     """
     y, X = patsy.dmatrices(formula, data=df, return_type="dataframe")
     y = np.asarray(y).ravel()
@@ -77,7 +146,10 @@ def fit_nb_glm_iter_alpha(
     zero_var_cols = col_std[col_std == 0].index.tolist()
     if zero_var_cols:
         import warnings
-        warnings.warn(f"Dropping {len(zero_var_cols)} zero-variance columns from design matrix")
+
+        warnings.warn(
+            f"Dropping {len(zero_var_cols)} zero-variance columns from design matrix"
+        )
         X = X.drop(columns=zero_var_cols)
 
     alpha = float(alpha_init)
@@ -96,7 +168,11 @@ def fit_nb_glm_iter_alpha(
             # Try with regularization if standard fit fails
             if not used_regularization:
                 import warnings
-                warnings.warn(f"Standard fit failed on iteration {iteration}, trying with L2 regularization")
+
+                warnings.warn(
+                    f"Standard fit failed on iteration {iteration}, "
+                    "trying with L2 regularization"
+                )
                 used_regularization = True
                 glm_res = model.fit_regularized(alpha=0.01, L1_wt=0)
             else:
@@ -114,16 +190,24 @@ def fit_nb_glm_iter_alpha(
         alpha = alpha_new
 
     # cluster-robust SE (only works with non-regularized fit)
-    if cluster_col is not None and cluster_col in df.columns and not used_regularization:
+    if (
+        cluster_col is not None
+        and cluster_col in df.columns
+        and not used_regularization
+    ):
         groups = df[cluster_col].astype(str).values
         # Re-fit with robust covariance
         try:
-            glm_res = model.fit(maxiter=100, cov_type="cluster", cov_kwds={"groups": groups})
+            glm_res = model.fit(
+                maxiter=100, cov_type="cluster", cov_kwds={"groups": groups}
+            )
         except Exception:
             import warnings
+
             warnings.warn("Cluster-robust SEs failed; using standard SEs.")
     elif used_regularization:
         import warnings
+
         warnings.warn("Regularization was used; cluster-robust SEs not available.")
 
     return FitResult(res=glm_res, alpha=alpha, formula=formula, data_cols=list(X.columns))

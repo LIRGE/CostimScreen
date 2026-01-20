@@ -2,7 +2,24 @@
 name = "costim-screen"
 version = "0.1.0"
 description = "Re-analysis toolkit for pooled CAR costim screens"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Stefan Cordes", email = "stefan@alumni.Princeton.edu"}
+]
 requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+keywords = ["CAR-T", "costimulatory", "screening", "negative binomial", "GLM"]
 dependencies = [
     "matplotlib>=3.7",
     "numpy>=1.24",
@@ -13,6 +30,23 @@ dependencies = [
     "statsmodels>=0.14"
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+docs = [
+    "sphinx>=6.0",
+    "sphinx-autodoc-typehints>=1.22",
+]
+
+[project.urls]
+Documentation = "https://github.com/username/CostimScreen#readme"
+Repository = "https://github.com/username/CostimScreen"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

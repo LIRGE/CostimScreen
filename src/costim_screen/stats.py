@@ -1,8 +1,20 @@
-# src/costim_screen/stats.py
+"""
+Statistical utilities for hypothesis testing and multiple comparison correction.
+
+This module provides functions for FDR correction and computing per-motif
+contrast tables with adjusted p-values.
+
+Functions
+---------
+bh_fdr
+    Benjamini-Hochberg FDR adjustment.
+motif_contrast_table
+    Compute per-motif contrasts between phenotypes with FDR correction.
+"""
 from __future__ import annotations
 
 import math
-from typing import Iterable, Optional
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -11,8 +23,10 @@ from .contrasts import motif_diff_between_phenotypes, wald_contrast
 
 
 def bh_fdr(pvals: np.ndarray) -> np.ndarray:
-    """
-    Benjamini-Hochberg FDR adjustment.
+    """Benjamini-Hochberg FDR adjustment.
+
+    Adjusts p-values to control the false discovery rate using the
+    Benjamini-Hochberg procedure.
 
     Parameters
     ----------
@@ -22,7 +36,21 @@ def bh_fdr(pvals: np.ndarray) -> np.ndarray:
     Returns
     -------
     qvals : np.ndarray
-        BH-adjusted q-values, same shape as pvals.
+        BH-adjusted q-values, same shape as pvals. Q-values represent
+        the minimum FDR at which the corresponding hypothesis would
+        be rejected.
+
+    Notes
+    -----
+    The procedure ranks p-values and computes q_i = p_i * n / rank_i,
+    then enforces monotonicity (q_i >= q_{i-1} for sorted p-values).
+
+    Examples
+    --------
+    >>> pvals = np.array([0.001, 0.01, 0.05, 0.1])
+    >>> qvals = bh_fdr(pvals)
+    >>> qvals
+    array([0.004, 0.02 , 0.067, 0.1  ])
     """
     pvals = np.asarray(pvals, dtype=float)
     n = pvals.size
@@ -58,24 +86,57 @@ def motif_contrast_table(
     log_base: float = 2.0,
     keep_missing: bool = False,
 ) -> pd.DataFrame:
-    """
-    Compute per-motif contrasts between phenotypes p and q:
-      - estimate on log scale (beta_p - beta_q)
-      - log2FC (or log_base)
-      - Wald p-value
-      - BH-adjusted q-value
+    """Compute per-motif contrasts between phenotypes with FDR correction.
 
-    Notes
-    -----
-    With your model:
-      count ~ 0 + C(phenotype) + C(block) + motif:C(phenotype)
-    the contrast (beta_motif:p - beta_motif:q) is the difference in motif-associated
-    multiplicative effects between phenotypes on the log scale.
+    For each motif, computes the Wald contrast between phenotypes p and q,
+    converts to log fold change, and applies multiple testing correction.
+
+    Parameters
+    ----------
+    fit : FitResult
+        Fitted model result from :func:`fit_nb_glm_iter_alpha`.
+    motifs : iterable of str
+        Names of the motif features to test.
+    p : str
+        First phenotype (the "numerator" in the comparison).
+    q : str
+        Second phenotype (the "denominator" in the comparison).
+    adjust : str, default "BH"
+        Multiple testing adjustment method. Currently only "BH"
+        (Benjamini-Hochberg) is supported.
+    log_base : float, default 2.0
+        Base for log fold change calculation (2.0 gives log2FC).
+    keep_missing : bool, default False
+        If True, include rows for motifs with missing coefficients
+        (with NaN values). If False, skip them silently.
 
     Returns
     -------
-    DataFrame with columns:
-      motif, phenotype_p, phenotype_q, log_effect, logFC, pvalue, qvalue, neglog10_q
+    pd.DataFrame
+        DataFrame with columns:
+        - motif: motif name
+        - phenotype_p: first phenotype
+        - phenotype_q: second phenotype
+        - log_effect: natural log effect size (beta_p - beta_q)
+        - logFC: log fold change in specified base
+        - pvalue: raw Wald p-value
+        - qvalue: FDR-adjusted q-value
+        - neglog10_q: -log10(qvalue) for volcano plots
+
+        Sorted by qvalue (most significant first).
+
+    Notes
+    -----
+    The log_effect represents the difference in log-scale coefficients,
+    which corresponds to the log of the fold change in expected counts
+    due to the motif.
+
+    Examples
+    --------
+    >>> result = motif_contrast_table(
+    ...     fit, motifs=motif_cols, p="EM_High", q="CM_High"
+    ... )
+    >>> result[result["qvalue"] < 0.1]  # significant motifs
     """
     rows = []
     motifs = list(motifs)

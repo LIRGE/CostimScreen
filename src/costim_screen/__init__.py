@@ -1,3 +1,41 @@
+"""
+costim-screen: Analysis toolkit for pooled CAR-T costimulatory domain screens.
+
+This package provides tools for analyzing pooled screening data using negative
+binomial generalized linear models (GLMs) with motif-phenotype interactions.
+
+Modules
+-------
+io
+    Data loading functions for count matrices and metadata.
+preprocess
+    Data transformation utilities (long format, library size, filtering).
+features
+    ELM design matrix construction and feature engineering.
+metadata_setup
+    Metadata parsing and candidate information merging.
+model
+    Negative binomial GLM fitting with iterative dispersion estimation.
+contrasts
+    Wald contrast computations for motif effects.
+stats
+    Statistical utilities including FDR correction.
+plots
+    Visualization functions (volcano plots).
+pooled
+    Pooled contrast analyses across phenotype groups.
+diagnostics
+    Model diagnostics and dispersion estimation.
+
+Example
+-------
+>>> import costim_screen as cs
+>>> counts = cs.load_counts_matrix("data/merged_counts.xlsx")
+>>> smeta = cs.load_sample_metadata("data/sample_metadata.xlsx")
+>>> cand = cs.load_candidate_metadata("data/candidate_metadata.xlsx")
+>>> # ... preprocessing and model fitting ...
+"""
+
 __version__ = "0.1.0"
 __author__ = "Stefan Cordes"
 __email__ = "stefan@alumni.Princeton.edu"

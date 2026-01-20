@@ -1,30 +1,86 @@
+"""
+Input/output functions for loading screen data.
+
+This module provides functions for reading Excel files containing count matrices,
+sample metadata, and candidate metadata. It handles common formatting issues and
+normalizes column names.
+
+Functions
+---------
+load_counts_matrix
+    Load a count matrix from Excel with candidate IDs as index.
+load_sample_metadata
+    Load sample metadata from Excel with sample IDs as index.
+load_candidate_metadata
+    Load candidate metadata including ELM categories.
+parse_samples_from_columns
+    Parse sample metadata from column naming conventions.
+write_sample_metadata_template
+    Write a blank sample metadata template CSV.
+
+Classes
+-------
+Paths
+    Data class holding paths to data and results directories.
+"""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 import pandas as pd
 
 
 @dataclass(frozen=True)
 class Paths:
+    """Container for data and results directory paths."""
+
+    #: Path to the directory containing input data files.
     data_path: Path
+    #: Path to the directory for output results.
     results_path: Path
 
 
 def load_candidate_metadata(
-        candidate_meta_xlsx: str | Path,
-        sheet_name: str | int = 0,
-        candidate_id_col: str = "CandidateID",
+    candidate_meta_xlsx: str | Path,
+    sheet_name: str | int = 0,
+    candidate_id_col: str = "CandidateID",
 ) -> pd.DataFrame:
-    """
-    Reads data/candidate_metadata.xlsx.
+    """Load candidate metadata from an Excel file.
 
-    Expected columns:
-      CandidateID, ELMCategory, ICD Num, Num ICD
-    Also computes:
-      is_gpcr = (Num ICD > 4)
+    Reads a candidate metadata Excel file and returns a DataFrame indexed by
+    candidate ID. Computes a derived ``is_gpcr`` column based on the number
+    of intracellular domains.
+
+    Parameters
+    ----------
+    candidate_meta_xlsx : str or Path
+        Path to the Excel file containing candidate metadata.
+    sheet_name : str or int, default 0
+        Sheet name or index to read.
+    candidate_id_col : str, default "CandidateID"
+        Name of the column containing candidate identifiers.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame indexed by CandidateID with columns:
+        - ELMCategory: semicolon-separated ELM motif categories
+        - ICD Num: intracellular domain number
+        - Num ICD: number of intracellular domains
+        - is_gpcr: 1 if Num ICD > 4, else 0
+
+    Raises
+    ------
+    ValueError
+        If required columns are missing from the input file.
+
+    Examples
+    --------
+    >>> cand = load_candidate_metadata("data/candidate_metadata.xlsx")
+    >>> cand.head()
     """
     candidate_meta_xlsx = Path(candidate_meta_xlsx)
     cand = pd.read_excel(candidate_meta_xlsx, sheet_name=sheet_name)
@@ -59,12 +115,39 @@ def load_counts_matrix(
     candidate_id_col: Optional[str] = "CandidateID",
     skip_first_col_if_unknown: bool = True,
 ) -> pd.DataFrame:
-    """
-    Reads data/merged_counts.xlsx.
+    """Load a count matrix from an Excel file.
 
-    Expected:
-      - one column holding candidate IDs (default 'CandidateID').
-      - remaining columns are sample_ids, values are raw integer counts.
+    Reads a count matrix where rows are candidates and columns are samples.
+    Values are expected to be integer counts.
+
+    Parameters
+    ----------
+    counts_xlsx : str or Path
+        Path to the Excel file containing the count matrix.
+    sheet_name : str or int, default 0
+        Sheet name or index to read.
+    candidate_id_col : str or None, default "CandidateID"
+        Name of the column containing candidate IDs. If None, attempts
+        to infer from the data.
+    skip_first_col_if_unknown : bool, default True
+        If candidate_id_col is not found, treat the first column as the ID column.
+
+    Returns
+    -------
+    pd.DataFrame
+        Count matrix with CandidateID as index and sample_id as columns.
+        Values are integers.
+
+    Raises
+    ------
+    ValueError
+        If the candidate ID column cannot be determined.
+
+    Examples
+    --------
+    >>> counts = load_counts_matrix("data/merged_counts.xlsx")
+    >>> counts.shape
+    (1000, 36)
     """
     counts_xlsx = Path(counts_xlsx)
     df = pd.read_excel(counts_xlsx, sheet_name=sheet_name)
@@ -92,11 +175,40 @@ def load_sample_metadata(
     sheet_name: str | int = 0,
     sample_id_col: str = "sample_id",
 ) -> pd.DataFrame:
-    """
-    Reads data/sample_metadata.xlsx.
+    """Load sample metadata from an Excel file.
 
-    Expected columns (with some tolerated typos):
-      sample_id, Donor, ExpCond, Tsubset, PD1Status, Replicate
+    Reads sample metadata and returns a DataFrame indexed by sample ID.
+    Handles common column name variations and typos.
+
+    Parameters
+    ----------
+    sample_meta_xlsx : str or Path
+        Path to the Excel file containing sample metadata.
+    sheet_name : str or int, default 0
+        Sheet name or index to read.
+    sample_id_col : str, default "sample_id"
+        Name of the column containing sample identifiers.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame indexed by sample_id with columns:
+        - Donor: donor identifier
+        - ExpCond: experimental condition
+        - Tsubset: T-cell subset (e.g., CM, EM, Naive)
+        - PD1Status: PD1 expression level (High/Low)
+        - Replicate: replicate number
+
+    Raises
+    ------
+    ValueError
+        If required columns are missing from the input file.
+
+    Examples
+    --------
+    >>> smeta = load_sample_metadata("data/sample_metadata.xlsx")
+    >>> smeta["Tsubset"].unique()
+    array(['CM', 'EM', 'Naive'], dtype=object)
     """
     sample_meta_xlsx = Path(sample_meta_xlsx)
     smeta = pd.read_excel(sample_meta_xlsx, sheet_name=sheet_name)
@@ -140,11 +252,12 @@ def load_sample_metadata(
 
 
 def _norm_col(c: object) -> str:
-    # strip whitespace; preserve internal chars
+    """Strip whitespace from a column name."""
     return str(c).strip()
 
 
 def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize all column names by stripping whitespace."""
     df = df.copy()
     df.columns = [_norm_col(c) for c in df.columns]
     return df
@@ -155,15 +268,30 @@ def parse_samples_from_columns(
     allowed_conditions: tuple[str, ...] = ("Alone", "Activated", "K562", "Raji"),
     allowed_memory: tuple[str, ...] = ("Naive", "CM", "EM"),
 ) -> pd.DataFrame:
-    """
-    Best-effort parser for sample IDs.
+    """Parse sample metadata from column naming conventions.
 
-    Expected to find:
-      donor: D1 / Donor1 / donor-1 etc.
-      condition: one of allowed_conditions
-      memory: Naive/CM/EM (or CentralMemory/EffectorMemory)
-      pd1: PD1hi/PD1high/hi/high or PD1lo/low
-      rep: rep1 / r1 / R1 etc.
+    Attempts to extract donor, condition, memory subset, PD1 status, and
+    replicate information from sample ID strings using pattern matching.
+
+    Parameters
+    ----------
+    sample_ids : list of str
+        List of sample ID strings to parse.
+    allowed_conditions : tuple of str, default ("Alone", "Activated", "K562", "Raji")
+        Valid experimental condition names.
+    allowed_memory : tuple of str, default ("Naive", "CM", "EM")
+        Valid T-cell memory subset names.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame indexed by sample_id with parsed metadata columns:
+        donor, condition, memory, pd1, rep. Values may be None if parsing fails.
+
+    Examples
+    --------
+    >>> sample_ids = ["D1_Raji_CM_PD1high_rep1", "D2_K562_EM_PD1low_rep2"]
+    >>> smeta = parse_samples_from_columns(sample_ids)
     """
     cond_map = {c.lower(): c for c in allowed_conditions}
     mem_map = {
@@ -241,11 +369,28 @@ def parse_samples_from_columns(
 
 
 def _tokenize_sample_id(sample_id: str) -> list[str]:
+    """Split a sample ID string into tokens."""
     toks = re.split(r"[\s_\-\.]+", sample_id.strip())
     return [t for t in toks if t]
 
 
 def write_sample_metadata_template(sample_ids: list[str], out_csv: str | Path) -> None:
+    """Write a blank sample metadata template CSV.
+
+    Creates a CSV file with sample IDs and empty columns for manual
+    metadata entry.
+
+    Parameters
+    ----------
+    sample_ids : list of str
+        List of sample ID strings.
+    out_csv : str or Path
+        Output path for the CSV file.
+
+    Examples
+    --------
+    >>> write_sample_metadata_template(["sample1", "sample2"], "template.csv")
+    """
     out_csv = Path(out_csv)
     df = pd.DataFrame(
         {

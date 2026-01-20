@@ -1,10 +1,32 @@
-# costim_screen/preprocessing.py
+"""
+Metadata parsing and candidate information merging.
+
+This module provides functions and specifications for parsing sample metadata
+from column names and merging candidate information from multiple Excel files.
+
+Functions
+---------
+build_elm_category_design
+    Build a one-hot design matrix for ELM categories with optional interactions.
+merge_candidate_metadata
+    Merge ELM annotations with topology information.
+sample_metadata_from_counts_xlsx
+    Parse sample metadata from count matrix column headers.
+split_sample_id
+    Split a sample ID string into metadata fields.
+
+Classes
+-------
+CandidateMergeSpec
+    Specification for column names when merging candidate metadata.
+SampleParseSpec
+    Specification for parsing sample ID strings.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
-import re
 from typing import Iterable, Sequence
 
 import numpy as np
@@ -15,60 +37,92 @@ from .features import split_elm_list
 
 @dataclass(frozen=True)
 class CandidateMergeSpec:
-    # input columns
+    """Specification for merging candidate metadata from multiple files.
+
+    Defines the expected input column names and desired output column names
+    for the merge operation.
+    """
+
+    #: Input column name for candidate ID.
     id_col: str = "ID"
+    #: Input column name for ELM vocabulary.
     elm_vocab_col: str = "elm vocab"
+    #: Input column name for ICD ID.
     icd_id_col: str = "ICD ID"
+    #: Input column name for ICD multiplicity.
     icd_mult_col: str = "Gene ICD Multiplicity"
-    # output columns
+    #: Output column name for candidate ID.
     out_id_col: str = "CandidateID"
+    #: Output column name for ELM category.
     out_elm_col: str = "ELMCategory"
+    #: Output column name for ICD number.
     out_icd_id_col: str = "ICD Num"
+    #: Output column name for ICD count.
     out_icd_mult_col: str = "Num ICD"
 
 
 @dataclass(frozen=True)
 class SampleParseSpec:
+    """Specification for parsing sample ID strings.
+
+    Defines how to split sample ID strings into metadata fields.
+    """
+
+    #: Separator character for splitting sample IDs.
     sep: str = "_"
+    #: Expected field names in order (Donor, ExpCond, Tsubset, PD1Status, Replicate).
     fields: tuple[str, ...] = ("Donor", "ExpCond", "Tsubset", "PD1Status", "Replicate")
 
 
 def build_elm_category_design(
-        candidates_df: pd.DataFrame,
-        candidate_id_col: str = "CandidateID",
-        elm_col: str = "ELMCategory",
-        min_freq: float = 0.01,
-        include_quadratic: bool = False,
-        min_interaction_freq: float | None = None,
-        max_interactions: int | None = 500,
-        interaction_sep: str = "__x__",
+    candidates_df: pd.DataFrame,
+    candidate_id_col: str = "CandidateID",
+    elm_col: str = "ELMCategory",
+    min_freq: float = 0.01,
+    include_quadratic: bool = False,
+    min_interaction_freq: float | None = None,
+    max_interactions: int | None = 500,
+    interaction_sep: str = "__x__",
 ) -> pd.DataFrame:
-    """
-    Build a one-hot design matrix for ELM categories.
+    """Build a one-hot design matrix for ELM categories.
+
+    Creates a binary design matrix from ELM category annotations, with optional
+    pairwise interaction terms for co-occurring motifs.
 
     Parameters
     ----------
     candidates_df : pd.DataFrame
         DataFrame with candidate IDs and ELM category strings.
-    candidate_id_col : str
+    candidate_id_col : str, default "CandidateID"
         Column name for candidate IDs (used as index).
-    elm_col : str
+    elm_col : str, default "ELMCategory"
         Column containing ELM category strings (semicolon/comma/pipe separated).
-    min_freq : float
+    min_freq : float, default 0.01
         Minimum fraction of candidates containing a feature to keep it.
-    include_quadratic : bool
-        If True, add pairwise interaction terms.
-    min_interaction_freq : float | None
-        Minimum frequency for interaction terms; defaults to min_freq.
-    max_interactions : int | None
-        Maximum number of interaction terms to keep (by frequency).
-    interaction_sep : str
-        Separator for interaction column names.
+    include_quadratic : bool, default False
+        If True, add pairwise interaction terms for co-occurring motifs.
+    min_interaction_freq : float or None, default None
+        Minimum frequency for interaction terms. Defaults to min_freq.
+    max_interactions : int or None, default 500
+        Maximum number of interaction terms to keep (most frequent).
+    interaction_sep : str, default "__x__"
+        Separator string for interaction column names.
 
     Returns
     -------
     pd.DataFrame
-        One-hot encoded design matrix, index=candidate_id, columns=features.
+        One-hot encoded design matrix with candidate_id as index and
+        ELM features (plus interactions if requested) as columns.
+
+    Examples
+    --------
+    >>> X_elm = build_elm_category_design(
+    ...     cand.reset_index(),
+    ...     candidate_id_col="CandidateID",
+    ...     elm_col="ELMCategory",
+    ...     min_freq=0.025,
+    ...     include_quadratic=False
+    ... )
     """
     from collections import Counter
 
@@ -117,25 +171,50 @@ def build_elm_category_design(
 
 
 def merge_candidate_metadata(
-        elms_xlsx: str | Path,
-        topo_xlsx: str | Path,
-        out_xlsx: str | Path | None = None,
-        sheet_elms: str | int = 0,
-        sheet_topo: str | int = 0,
-        spec: CandidateMergeSpec = CandidateMergeSpec(),
+    elms_xlsx: str | Path,
+    topo_xlsx: str | Path,
+    out_xlsx: str | Path | None = None,
+    sheet_elms: str | int = 0,
+    sheet_topo: str | int = 0,
+    spec: CandidateMergeSpec = CandidateMergeSpec(),
 ) -> pd.DataFrame:
-    """
-    Inner join on 'ID' between:
-      - data/costim_normalized_elms_groupings.xlsx: ['ID', 'elm vocab']
-      - data/costim_topol_protein_families.xlsx: ['ID', 'ICD ID', 'ICD Multiplicity']
+    """Merge ELM annotations with topology information.
 
-    Renames:
-      ID -> CandidateID
-      elm vocab -> ELMCategory
-      ICD ID -> ICD Num
-      ICD Multiplicity -> Num ICD
+    Performs an inner join between ELM annotation data and topology/protein
+    family data, producing a unified candidate metadata table.
 
-    Writes to out_xlsx if provided, and returns merged DataFrame.
+    Parameters
+    ----------
+    elms_xlsx : str or Path
+        Path to Excel file with ELM annotations (e.g., costim_normalized_elms_groupings.xlsx).
+    topo_xlsx : str or Path
+        Path to Excel file with topology data (e.g., costim_topol_protein_families.xlsx).
+    out_xlsx : str, Path, or None, default None
+        If provided, write merged data to this Excel file.
+    sheet_elms : str or int, default 0
+        Sheet name or index in the ELM file.
+    sheet_topo : str or int, default 0
+        Sheet name or index in the topology file.
+    spec : CandidateMergeSpec, default CandidateMergeSpec()
+        Specification for column name mapping.
+
+    Returns
+    -------
+    pd.DataFrame
+        Merged DataFrame with columns: CandidateID, ELMCategory, ICD Num, Num ICD.
+
+    Raises
+    ------
+    ValueError
+        If required columns are missing from input files.
+
+    Examples
+    --------
+    >>> cand = merge_candidate_metadata(
+    ...     "data/costim_normalized_elms_groupings.xlsx",
+    ...     "data/costim_topol_protein_families.xlsx",
+    ...     out_xlsx="data/candidate_metadata.xlsx"
+    ... )
     """
     elms_xlsx = Path(elms_xlsx)
     topo_xlsx = Path(topo_xlsx)
@@ -171,7 +250,7 @@ def merge_candidate_metadata(
         }
     )
 
-    # Remove surrounding brackets from ELMCategory values (e.g., "[elm1, elm2]" -> "elm1, elm2")
+    # Remove surrounding brackets from ELMCategory values
     merged[spec.out_elm_col] = (
         merged[spec.out_elm_col]
         .astype(str)
@@ -188,6 +267,7 @@ def merge_candidate_metadata(
 
 
 def _normalize_excel_columns(cols: Iterable) -> list[str]:
+    """Strip whitespace from Excel column names."""
     return [str(c).strip() for c in cols]
 
 
@@ -200,19 +280,41 @@ def sample_metadata_from_counts_xlsx(
     skip_first_col_if_unknown: bool = True,
     strict: bool = True,
 ) -> pd.DataFrame:
-    """
-    Reads ONLY the header of the counts matrix workbook and parses sample metadata
-    from column names by splitting on spec.sep.
+    """Parse sample metadata from count matrix column headers.
 
-    Assumptions:
-      - One column is the domain/candidate ID column.
-      - All other columns are sample IDs encoding metadata.
+    Reads the header row of a counts Excel file and parses sample metadata
+    from the column names by splitting on a separator character.
 
-    domain_id_col:
-      - If provided and present, it's excluded from sample columns.
-      - Otherwise, if skip_first_col_if_unknown=True, the first column is excluded.
+    Parameters
+    ----------
+    counts_xlsx : str or Path
+        Path to the counts Excel file.
+    out_xlsx : str, Path, or None, default "data/sample_metadata.xlsx"
+        If provided, write parsed metadata to this Excel file.
+    sheet_name : str or int, default 0
+        Sheet name or index to read.
+    spec : SampleParseSpec, default SampleParseSpec()
+        Specification for parsing sample IDs.
+    domain_id_col : str or None, default None
+        Name of the domain/candidate ID column to exclude. If None and
+        skip_first_col_if_unknown is True, the first column is excluded.
+    skip_first_col_if_unknown : bool, default True
+        If domain_id_col is not found, skip the first column.
+    strict : bool, default True
+        If True, raise an error if sample IDs don't parse correctly.
 
-    Writes to out_xlsx if provided, and returns the metadata DataFrame indexed by sample_id.
+    Returns
+    -------
+    pd.DataFrame
+        Sample metadata DataFrame indexed by sample_id with columns
+        for each field in spec.fields.
+
+    Examples
+    --------
+    >>> smeta = sample_metadata_from_counts_xlsx(
+    ...     "data/merged_counts.xlsx",
+    ...     out_xlsx="data/sample_metadata.xlsx"
+    ... )
     """
     counts_xlsx = Path(counts_xlsx)
 
@@ -242,12 +344,36 @@ def split_sample_id(
     spec: SampleParseSpec = SampleParseSpec(),
     strict: bool = True,
 ) -> dict[str, object]:
-    """
-    Split a sample_id like:
-      Donor_ExpCond_Tsubset_PD1Status_Replicate
-    using spec.sep into spec.fields.
+    """Split a sample ID string into metadata fields.
 
-    If strict=True, raises if the number of tokens != len(fields).
+    Parses a sample ID like "1_CAR:Raji_CM_High_1" into its component
+    fields (Donor, ExpCond, Tsubset, PD1Status, Replicate).
+
+    Parameters
+    ----------
+    sample_id : str
+        The sample ID string to parse.
+    spec : SampleParseSpec, default SampleParseSpec()
+        Specification for parsing (separator and field names).
+    strict : bool, default True
+        If True, raise ValueError if the number of tokens doesn't match
+        the expected number of fields.
+
+    Returns
+    -------
+    dict
+        Dictionary with 'sample_id' key plus one key per field in spec.fields.
+
+    Raises
+    ------
+    ValueError
+        If strict=True and the number of tokens doesn't match spec.fields.
+
+    Examples
+    --------
+    >>> split_sample_id("1_CAR:Raji_CM_High_1")
+    {'sample_id': '1_CAR:Raji_CM_High_1', 'Donor': '1', 'ExpCond': 'CAR:Raji',
+     'Tsubset': 'CM', 'PD1Status': 'High', 'Replicate': '1'}
     """
     sid = str(sample_id).strip()
     toks = sid.split(spec.sep)
@@ -260,7 +386,7 @@ def split_sample_id(
 
     # best-effort if non-strict
     toks = (toks + [""] * len(spec.fields))[: len(spec.fields)]
-    out = {"sample_id": sid}
+    out: dict[str, object] = {"sample_id": sid}
     out.update({k: v for k, v in zip(spec.fields, toks)})
 
     return out
