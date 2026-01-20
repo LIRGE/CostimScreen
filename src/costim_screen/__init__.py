@@ -51,12 +51,33 @@ from .model import (
     fit_nb_glm_iter_alpha,
 )
 
+# plots
+from .plots import (
+    volcano_plot,
+)
+
+# pooled
+from .pooled import (
+    motif_contrast_table_pd1_pooled_tsubset,
+    motif_contrast_table_tsubset_pooled_pd1,
+    motif_diff_between_pd1_pooled_tsubset,
+    motif_diff_between_tsubsets_pooled_pd1,
+    volcano_pd1_pooled_tsubset,
+    volcano_tsubset_pooled_pd1,
+)
+
 # preprocess
 from .preprocess import (
     add_library_size,
     counts_to_long,
     filter_domains_by_total_counts,
     make_block_id,
+)
+
+# stats
+from .stats import (
+    bh_fdr,
+    motif_contrast_table,
 )
 
 __all__ = [
@@ -91,9 +112,21 @@ __all__ = [
     "FitResult",
     "build_joint_formula",
     "fit_nb_glm_iter_alpha",
+    # plots
+    "volcano_plot",
+    # pooled
+    "motif_contrast_table_pd1_pooled_tsubset",
+    "motif_contrast_table_tsubset_pooled_pd1",
+    "motif_diff_between_pd1_pooled_tsubset",
+    "motif_diff_between_tsubsets_pooled_pd1",
+    "volcano_pd1_pooled_tsubset",
+    "volcano_tsubset_pooled_pd1",
     # preprocess
     "add_library_size",
     "counts_to_long",
     "filter_domains_by_total_counts",
     "make_block_id",
+    # stats
+    "bh_fdr",
+    "motif_contrast_table",
 ]
