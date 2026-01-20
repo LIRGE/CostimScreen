@@ -389,7 +389,7 @@ def volcano_tsubset_pooled_pd1(
         tab,
         q_thresh=q_thresh,
         lfc_thresh=lfc_thresh,
-        title=title or f"{tsubset_p} vs {tsubset_q} (pooled PD1)",
+        title=title or f"{tsubset_p} vs {tsubset_q}",
         top_n_labels=top_n_labels,
         outpath=outpath,
     )
@@ -449,7 +449,7 @@ def volcano_pd1_pooled_tsubset(
         tab,
         q_thresh=q_thresh,
         lfc_thresh=lfc_thresh,
-        title=title or f"PD1 {pd1_high} vs {pd1_low} (pooled Tsubset)",
+        title=title or "PD1 High vs Low",
         top_n_labels=top_n_labels,
         outpath=outpath,
     )

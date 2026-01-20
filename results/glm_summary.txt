@@ -6,7 +6,7 @@ Model Family:        NegativeBinomial   Df Model:                          220
 Link Function:                    Log   Scale:                          1.0000
 Method:                          IRLS   Log-Likelihood:            -2.8815e+05
 Date:                Tue, 20 Jan 2026   Deviance:                   1.0616e+05
-Time:                        14:08:50   Pearson chi2:                 9.18e+04
+Time:                        16:07:42   Pearson chi2:                 9.18e+04
 No. Iterations:                    38   Pseudo R-squ. (CS):             0.4323
 Covariance Type:              cluster                                         
 =======================================================================================================

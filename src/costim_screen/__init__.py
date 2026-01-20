@@ -91,6 +91,8 @@ from .model import (
 
 # plots
 from .plots import (
+    coef_heatmap,
+    pooled_coef_heatmap,
     volcano_plot,
 )
 
@@ -151,6 +153,8 @@ __all__ = [
     "build_joint_formula",
     "fit_nb_glm_iter_alpha",
     # plots
+    "coef_heatmap",
+    "pooled_coef_heatmap",
     "volcano_plot",
     # pooled
     "motif_contrast_table_pd1_pooled_tsubset",
