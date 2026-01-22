@@ -3,7 +3,7 @@ Data preprocessing utilities.
 
 This module provides functions for transforming count data from wide to long
 format, computing library sizes, filtering low-abundance candidates, and
-creating block identifiers for mixed-effects modeling.
+creating CCR identifiers for mixed-effects modeling.
 
 Functions
 ---------
@@ -13,8 +13,8 @@ add_library_size
     Compute library sizes and log offsets.
 filter_domains_by_total_counts
     Filter candidates by minimum total counts.
-make_block_id
-    Create block identifiers for clustering/random effects.
+make_ccr_id
+    Create CCR identifiers for cluster-robust standard errors.
 """
 from __future__ import annotations
 
@@ -134,12 +134,12 @@ def filter_domains_by_total_counts(
     return counts_wide.loc[keep]
 
 
-def make_block_id(sample_meta: pd.DataFrame) -> pd.Series:
-    """Create block identifiers for cluster-robust standard errors.
+def make_ccr_id(sample_meta: pd.DataFrame) -> pd.Series:
+    """Create CCR identifiers for cluster-robust standard errors.
 
-    Constructs a block ID string combining donor, experimental condition,
+    Constructs a CCR ID string combining donor, experimental condition,
     and replicate. This is used for clustering observations in the GLM
-    to account for correlated errors within blocks.
+    to account for correlated errors within CCRs.
 
     Parameters
     ----------
@@ -150,7 +150,7 @@ def make_block_id(sample_meta: pd.DataFrame) -> pd.Series:
     Returns
     -------
     pd.Series
-        Block ID strings in format "Donor_ExpCond_rReplicate".
+        CCR ID strings in format "Donor_ExpCond_rReplicate".
 
     Notes
     -----
@@ -166,7 +166,7 @@ def make_block_id(sample_meta: pd.DataFrame) -> pd.Series:
     ...     "ExpCond": ["Raji", "Raji", "K562"],
     ...     "Replicate": [1, 2, 1]
     ... })
-    >>> make_block_id(smeta)
+    >>> make_ccr_id(smeta)
     0    1_Raji_r1
     1    1_Raji_r2
     2    2_K562_r1

@@ -19,7 +19,8 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from .contrasts import motif_diff_between_phenotypes, wald_contrast
+from .contrasts import motif_diff_between_phenotypes, wald_contrast_full
+from .utils import normalize_phenotype
 
 
 def bh_fdr(pvals: np.ndarray) -> np.ndarray:
@@ -118,6 +119,8 @@ def motif_contrast_table(
         - phenotype_p: first phenotype
         - phenotype_q: second phenotype
         - log_effect: natural log effect size (beta_p - beta_q)
+        - se_log_effect: standard error of log_effect
+        - z: z-score (log_effect / se_log_effect)
         - logFC: log fold change in specified base
         - pvalue: raw Wald p-value
         - qvalue: FDR-adjusted q-value
@@ -140,17 +143,25 @@ def motif_contrast_table(
     """
     rows = []
     motifs = list(motifs)
+    ln_base = math.log(float(log_base))
+
+    # Normalize phenotype names
+    p = normalize_phenotype(p)
+    q = normalize_phenotype(q)
 
     for m in motifs:
         try:
             L, name = motif_diff_between_phenotypes(fit, m, p, q)
-            est_log, pval = wald_contrast(fit, L, name)
+            est_log, se_log, z, pval = wald_contrast_full(fit, L, name)
             rows.append(
                 {
                     "motif": m,
                     "phenotype_p": p,
                     "phenotype_q": q,
                     "log_effect": float(est_log),  # natural log
+                    "se_log_effect": float(se_log),
+                    "z": float(z),
+                    "logFC": float(est_log) / ln_base,
                     "pvalue": float(pval),
                 }
             )
@@ -162,6 +173,9 @@ def motif_contrast_table(
                         "phenotype_p": p,
                         "phenotype_q": q,
                         "log_effect": np.nan,
+                        "se_log_effect": np.nan,
+                        "z": np.nan,
+                        "logFC": np.nan,
                         "pvalue": np.nan,
                     }
                 )
@@ -170,10 +184,6 @@ def motif_contrast_table(
     df = pd.DataFrame(rows)
     if df.empty:
         return df
-
-    # Convert ln effect to log-base fold change
-    ln_base = math.log(float(log_base))
-    df["logFC"] = df["log_effect"] / ln_base
 
     # Adjust p-values
     if adjust.upper() in {"BH", "FDR", "BENJAMINI-HOCHBERG"}:
@@ -186,4 +196,10 @@ def motif_contrast_table(
 
     # Sort: most significant first
     df = df.sort_values(["qvalue", "pvalue"], ascending=True).reset_index(drop=True)
+
+    # Reorder columns for readability
+    cols = ["motif", "phenotype_p", "phenotype_q", "log_effect", "se_log_effect",
+            "z", "logFC", "pvalue", "qvalue", "neglog10_q"]
+    df = df.loc[:, [c for c in cols if c in df.columns]]
+
     return df

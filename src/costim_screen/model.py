@@ -28,6 +28,7 @@ import patsy
 import statsmodels.api as sm
 
 from .diagnostics import estimate_alpha_nb2_moments
+from .utils import normalize_phenotype
 
 
 @dataclass
@@ -49,12 +50,12 @@ def build_joint_formula(motif_cols: list[str]) -> str:
 
     Creates a formula string for a negative binomial GLM with:
     - Phenotype-specific intercepts (no global intercept)
-    - Block fixed effects for batch correction
+    - CCR fixed effects for batch correction
     - Motif effects that vary by phenotype (interactions)
 
     The model structure is::
 
-        count ~ 0 + C(phenotype) + C(block) + motif1:C(phenotype) + motif2:C(phenotype) + ...
+        count ~ 0 + C(phenotype) + C(CCR) + motif1:C(phenotype) + motif2:C(phenotype) + ...
 
     Parameters
     ----------
@@ -70,24 +71,24 @@ def build_joint_formula(motif_cols: list[str]) -> str:
     --------
     >>> formula = build_joint_formula(["ELM_SH3", "ELM_SUMO"])
     >>> print(formula)
-    count ~ 0 + C(phenotype) + C(block) + ELM_SH3:C(phenotype) + ELM_SUMO:C(phenotype)
+    count ~ 0 + C(phenotype) + C(CCR) + ELM_SH3:C(phenotype) + ELM_SUMO:C(phenotype)
     """
     # interactions for each motif
     inter = " + ".join([f"{m}:C(phenotype)" for m in motif_cols])
-    formula = "count ~ 0 + C(phenotype) + C(block)"
+    formula = "count ~ 0 + C(phenotype) + C(CCR)"
     if inter:
         formula += " + " + inter
     return formula
 
 
 def fit_nb_glm_iter_alpha(
-    df: pd.DataFrame,
-    formula: str,
-    offset_col: str = "offset",
-    max_iter: int = 8,
-    alpha_init: float = 0.1,
-    cluster_col: Optional[str] = "block",
-    regularization: float = 0.0,
+        df: pd.DataFrame,
+        formula: str,
+        offset_col: str = "offset",
+        max_iter: int = 8,
+        alpha_init: float = 0.1,
+        cluster_col: Optional[str] = "CCR",
+        regularization: float = 0.0,
 ) -> FitResult:
     """Fit a negative binomial GLM with iterative dispersion estimation.
 
@@ -103,7 +104,7 @@ def fit_nb_glm_iter_alpha(
     Parameters
     ----------
     df : pd.DataFrame
-        Long-format data with count, phenotype, block, offset, and motif columns.
+        Long-format data with count, phenotype, CCR, offset, and motif columns.
     formula : str
         Patsy formula string (see :func:`build_joint_formula`).
     offset_col : str, default "offset"
@@ -112,7 +113,7 @@ def fit_nb_glm_iter_alpha(
         Maximum iterations for alpha estimation.
     alpha_init : float, default 0.1
         Initial dispersion parameter value.
-    cluster_col : str or None, default "block"
+    cluster_col : str or None, default "CCR"
         Column name for cluster-robust standard errors. If None, uses
         standard (non-robust) SEs.
     regularization : float, default 0.0
@@ -137,6 +138,11 @@ def fit_nb_glm_iter_alpha(
     >>> print(f"Dispersion: {fit.alpha:.3f}")
     Dispersion: 1.152
     """
+    # Normalize phenotype column to ASCII before fitting
+    df = df.copy()
+    if "phenotype" in df.columns:
+        df["phenotype"] = df["phenotype"].apply(normalize_phenotype)
+
     y, X = patsy.dmatrices(formula, data=df, return_type="dataframe")
     y = np.asarray(y).ravel()
     offset = np.asarray(df[offset_col], dtype=float)
@@ -165,18 +171,25 @@ def fit_nb_glm_iter_alpha(
             else:
                 glm_res = model.fit(maxiter=100)
         except (ValueError, np.linalg.LinAlgError) as e:
-            # Try with regularization if standard fit fails
-            if not used_regularization:
-                import warnings
+            # If standard fit fails, use L2 regularization only to get start_params,
+            # then refit unregularized so we can compute cluster-robust SEs.
+            import warnings
+            warnings.warn(
+                f"Standard fit failed on iteration {iteration}; "
+                "using L2 regularization to initialize, then refitting unregularized."
+            )
+            reg_res = model.fit_regularized(alpha=max(regularization, 0.01), L1_wt=0)
 
+            try:
+                glm_res = model.fit(start_params=np.asarray(reg_res.params), maxiter=200)
+                used_regularization = False
+            except Exception as e2:
                 warnings.warn(
-                    f"Standard fit failed on iteration {iteration}, "
-                    "trying with L2 regularization"
+                    "Refit without regularization failed; keeping regularized fit "
+                    "(cluster-robust SEs will not be available)."
                 )
+                glm_res = reg_res
                 used_regularization = True
-                glm_res = model.fit_regularized(alpha=0.01, L1_wt=0)
-            else:
-                raise e
 
         mu = glm_res.fittedvalues
         alpha_new = estimate_alpha_nb2_moments(y, np.asarray(mu))
@@ -189,25 +202,29 @@ def fit_nb_glm_iter_alpha(
             break
         alpha = alpha_new
 
-    # cluster-robust SE (only works with non-regularized fit)
-    if (
-        cluster_col is not None
-        and cluster_col in df.columns
-        and not used_regularization
-    ):
+    # Final refit with the final alpha so that fit.res matches fit.alpha
+    fam_final = sm.families.NegativeBinomial(alpha=float(alpha))
+    model_final = sm.GLM(y, X, family=fam_final, offset=offset)
+
+    if cluster_col is not None and cluster_col in df.columns and not used_regularization:
         groups = df[cluster_col].astype(str).values
-        # Re-fit with robust covariance
         try:
-            glm_res = model.fit(
-                maxiter=100, cov_type="cluster", cov_kwds={"groups": groups}
+            glm_res = model_final.fit(
+                maxiter=200,
+                cov_type="cluster",
+                cov_kwds={"groups": groups},
             )
         except Exception:
             import warnings
-
             warnings.warn("Cluster-robust SEs failed; using standard SEs.")
-    elif used_regularization:
-        import warnings
+            glm_res = model_final.fit(maxiter=200)
+    else:
+        glm_res = model_final.fit(maxiter=200)
+        if used_regularization:
+            import warnings
+            warnings.warn(
+                "Regularization was used during fitting; cluster-robust SEs are not available "
+                "for regularized fits."
+            )
 
-        warnings.warn("Regularization was used; cluster-robust SEs not available.")
-
-    return FitResult(res=glm_res, alpha=alpha, formula=formula, data_cols=list(X.columns))
+    return FitResult(res=glm_res, alpha=float(alpha), formula=formula, data_cols=list(X.columns))

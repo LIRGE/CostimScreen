@@ -30,13 +30,19 @@ from typing import Iterable, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from .contrasts import coef_name_for_motif_phenotype, wald_contrast
+from .contrasts import coef_name_for_motif_phenotype, wald_contrast_full
 from .plots import volcano_plot
 from .stats import bh_fdr
+from .utils import normalize_phenotype
 
 
 def _phenotype_label(tsubset: str, pd1: str) -> str:
-    """Construct phenotype label from T-subset and PD1 status."""
+    """Construct phenotype label from T-subset and PD1 status.
+
+    Normalizes both components to ASCII before joining.
+    """
+    tsubset = normalize_phenotype(tsubset)
+    pd1 = normalize_phenotype(pd1)
     return f"{tsubset}_{pd1}"
 
 
@@ -75,12 +81,12 @@ def _build_L_from_weights(fit, weights: dict[str, float]) -> np.ndarray:
 
 
 def motif_diff_between_tsubsets_pooled_pd1(
-    fit,
-    motif: str,
-    tsubset_p: str,
-    tsubset_q: str,
-    *,
-    pd1_levels: Sequence[str] = ("High", "Low"),
+        fit,
+        motif: str,
+        tsubset_p: str,
+        tsubset_q: str,
+        *,
+        pd1_levels: Sequence[str] = ("High", "Low"),
 ) -> Tuple[np.ndarray, str]:
     """Build contrast for T-subset comparison pooled over PD1 levels.
 
@@ -122,6 +128,10 @@ def motif_diff_between_tsubsets_pooled_pd1(
     >>> print(name)
     ELM_SH3: EM - CM (pooled PD1)
     """
+    # Normalize T-subset names
+    tsubset_p = normalize_phenotype(tsubset_p)
+    tsubset_q = normalize_phenotype(tsubset_q)
+
     w = {}
     k = len(pd1_levels)
     for pd1 in pd1_levels:
@@ -136,12 +146,12 @@ def motif_diff_between_tsubsets_pooled_pd1(
 
 
 def motif_diff_between_pd1_pooled_tsubset(
-    fit,
-    motif: str,
-    *,
-    tsubsets: Sequence[str] = ("Naïve", "CM", "EM"),
-    pd1_high: str = "High",
-    pd1_low: str = "Low",
+        fit,
+        motif: str,
+        *,
+        tsubsets: Sequence[str] = ("Naive", "CM", "EM"),
+        pd1_high: str = "High",
+        pd1_low: str = "Low",
 ) -> Tuple[np.ndarray, str]:
     """Build contrast for PD1 comparison pooled over T-subsets.
 
@@ -161,7 +171,7 @@ def motif_diff_between_pd1_pooled_tsubset(
         Fitted model result.
     motif : str
         Name of the motif feature.
-    tsubsets : sequence of str, default ("Naïve", "CM", "EM")
+    tsubsets : sequence of str, default ("Naive", "CM", "EM")
         T-subset levels to pool over.
     pd1_high : str, default "High"
         Label for PD1 high status.
@@ -196,15 +206,96 @@ def motif_diff_between_pd1_pooled_tsubset(
     return L, name
 
 
+def motif_contrast_table_pd1_pooled_tsubset(
+        fit,
+        motifs: Iterable[str],
+        *,
+        tsubsets: Sequence[str] = ("Naive", "CM", "EM"),
+        pd1_high: str = "High",
+        pd1_low: str = "Low",
+        adjust: str = "BH",
+        log_base: float = 2.0,
+) -> pd.DataFrame:
+    """Compute per-motif PD1 contrasts pooled over T-subsets.
+
+    For each motif, computes the pooled contrast between PD1 levels,
+    converts to log fold change, and applies FDR correction.
+
+    Parameters
+    ----------
+    fit : FitResult
+        Fitted model result.
+    motifs : iterable of str
+        Names of motif features to test.
+    tsubsets : sequence of str, default ("Naive", "CM", "EM")
+        T-subsets to pool over.
+    pd1_high : str, default "High"
+        Label for PD1 high.
+    pd1_low : str, default "Low"
+        Label for PD1 low.
+    adjust : str, default "BH"
+        Multiple testing adjustment method.
+    log_base : float, default 2.0
+        Base for log fold change.
+
+    Returns
+    -------
+    pd.DataFrame
+        Contrast results with columns: motif, contrast, log_effect,
+        se_log_effect, z, logFC, pvalue, qvalue, neglog10_q.
+    """
+    rows = []
+    ln_base = math.log(float(log_base))
+
+    for m in motifs:
+        try:
+            L, name = motif_diff_between_pd1_pooled_tsubset(
+                fit, m, tsubsets=tsubsets, pd1_high=pd1_high, pd1_low=pd1_low
+            )
+            est_log, se_log, z, pval = wald_contrast_full(fit, L, name)
+            rows.append(
+                {
+                    "motif": m,
+                    "contrast": f"PD1{pd1_high}-PD1{pd1_low} pooled_Tsubset",
+                    "log_effect": float(est_log),
+                    "se_log_effect": float(se_log),
+                    "z": float(z),
+                    "logFC": float(est_log) / ln_base,
+                    "pvalue": float(pval),
+                }
+            )
+        except KeyError:
+            continue
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    if adjust.upper() in {"BH", "FDR", "BENJAMINI-HOCHBERG"}:
+        df["qvalue"] = bh_fdr(df["pvalue"].values)
+    else:
+        raise ValueError(f"Unknown adjust='{adjust}'. Use 'BH'.")
+
+    df["neglog10_q"] = -np.log10(df["qvalue"].clip(lower=1e-300))
+    df = df.sort_values(["qvalue", "pvalue"], ascending=True).reset_index(drop=True)
+
+    # Reorder columns for readability
+    cols = ["motif", "contrast", "log_effect", "se_log_effect",
+            "z", "logFC", "pvalue", "qvalue", "neglog10_q"]
+    df = df.loc[:, [c for c in cols if c in df.columns]]
+
+    return df
+
+
 def motif_contrast_table_tsubset_pooled_pd1(
-    fit,
-    motifs: Iterable[str],
-    *,
-    tsubset_p: str,
-    tsubset_q: str,
-    pd1_levels: Sequence[str] = ("High", "Low"),
-    adjust: str = "BH",
-    log_base: float = 2.0,
+        fit,
+        motifs: Iterable[str],
+        *,
+        tsubset_p: str,
+        tsubset_q: str,
+        pd1_levels: Sequence[str] = ("High", "Low"),
+        adjust: str = "BH",
+        log_base: float = 2.0,
 ) -> pd.DataFrame:
     """Compute per-motif T-subset contrasts pooled over PD1.
 
@@ -232,25 +323,34 @@ def motif_contrast_table_tsubset_pooled_pd1(
     -------
     pd.DataFrame
         Contrast results with columns: motif, contrast, log_effect,
-        logFC, pvalue, qvalue, neglog10_q.
+        se_log_effect, z, logFC, pvalue, qvalue, neglog10_q.
     """
+    # Normalize T-subset names
+    tsubset_p = normalize_phenotype(tsubset_p)
+    tsubset_q = normalize_phenotype(tsubset_q)
+
     rows = []
     ln_base = math.log(float(log_base))
 
     for m in motifs:
-        L, name = motif_diff_between_tsubsets_pooled_pd1(
-            fit, m, tsubset_p, tsubset_q, pd1_levels=pd1_levels
-        )
-        est_log, pval = wald_contrast(fit, L, name)
-        rows.append(
-            {
-                "motif": m,
-                "contrast": f"{tsubset_p}-{tsubset_q} pooled_PD1",
-                "log_effect": float(est_log),  # natural log
-                "logFC": float(est_log) / ln_base,
-                "pvalue": float(pval),
-            }
-        )
+        try:
+            L, name = motif_diff_between_tsubsets_pooled_pd1(
+                fit, m, tsubset_p, tsubset_q, pd1_levels=pd1_levels
+            )
+            est_log, se_log, z, pval = wald_contrast_full(fit, L, name)
+            rows.append(
+                {
+                    "motif": m,
+                    "contrast": f"{tsubset_p}-{tsubset_q} pooled_PD1",
+                    "log_effect": float(est_log),
+                    "se_log_effect": float(se_log),
+                    "z": float(z),
+                    "logFC": float(est_log) / ln_base,
+                    "pvalue": float(pval),
+                }
+            )
+        except KeyError:
+            continue
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -263,91 +363,27 @@ def motif_contrast_table_tsubset_pooled_pd1(
 
     df["neglog10_q"] = -np.log10(df["qvalue"].clip(lower=1e-300))
     df = df.sort_values(["qvalue", "pvalue"], ascending=True).reset_index(drop=True)
-    return df
 
+    # Reorder columns for readability
+    cols = ["motif", "contrast", "log_effect", "se_log_effect",
+            "z", "logFC", "pvalue", "qvalue", "neglog10_q"]
+    df = df.loc[:, [c for c in cols if c in df.columns]]
 
-def motif_contrast_table_pd1_pooled_tsubset(
-    fit,
-    motifs: Iterable[str],
-    *,
-    tsubsets: Sequence[str] = ("Naïve", "CM", "EM"),
-    pd1_high: str = "High",
-    pd1_low: str = "Low",
-    adjust: str = "BH",
-    log_base: float = 2.0,
-) -> pd.DataFrame:
-    """Compute per-motif PD1 contrasts pooled over T-subsets.
-
-    For each motif, computes the pooled contrast between PD1 levels,
-    converts to log fold change, and applies FDR correction.
-
-    Parameters
-    ----------
-    fit : FitResult
-        Fitted model result.
-    motifs : iterable of str
-        Names of motif features to test.
-    tsubsets : sequence of str, default ("Naïve", "CM", "EM")
-        T-subsets to pool over.
-    pd1_high : str, default "High"
-        Label for PD1 high.
-    pd1_low : str, default "Low"
-        Label for PD1 low.
-    adjust : str, default "BH"
-        Multiple testing adjustment method.
-    log_base : float, default 2.0
-        Base for log fold change.
-
-    Returns
-    -------
-    pd.DataFrame
-        Contrast results with columns: motif, contrast, log_effect,
-        logFC, pvalue, qvalue, neglog10_q.
-    """
-    rows = []
-    ln_base = math.log(float(log_base))
-
-    for m in motifs:
-        L, name = motif_diff_between_pd1_pooled_tsubset(
-            fit, m, tsubsets=tsubsets, pd1_high=pd1_high, pd1_low=pd1_low
-        )
-        est_log, pval = wald_contrast(fit, L, name)
-        rows.append(
-            {
-                "motif": m,
-                "contrast": f"PD1{pd1_high}-PD1{pd1_low} pooled_Tsubset",
-                "log_effect": float(est_log),
-                "logFC": float(est_log) / ln_base,
-                "pvalue": float(pval),
-            }
-        )
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-
-    if adjust.upper() in {"BH", "FDR", "BENJAMINI-HOCHBERG"}:
-        df["qvalue"] = bh_fdr(df["pvalue"].values)
-    else:
-        raise ValueError(f"Unknown adjust='{adjust}'. Use 'BH'.")
-
-    df["neglog10_q"] = -np.log10(df["qvalue"].clip(lower=1e-300))
-    df = df.sort_values(["qvalue", "pvalue"], ascending=True).reset_index(drop=True)
     return df
 
 
 def volcano_tsubset_pooled_pd1(
-    fit,
-    motifs: Iterable[str],
-    *,
-    tsubset_p: str,
-    tsubset_q: str,
-    pd1_levels: Sequence[str] = ("High", "Low"),
-    q_thresh: float = 0.10,
-    lfc_thresh: float = 1.0,
-    title: Optional[str] = None,
-    top_n_labels: int = 12,
-    outpath: Optional[str | Path] = None,
+        fit,
+        motifs: Iterable[str],
+        *,
+        tsubset_p: str,
+        tsubset_q: str,
+        pd1_levels: Sequence[str] = ("High", "Low"),
+        q_thresh: float = 0.10,
+        lfc_thresh: float = 1.0,
+        title: Optional[str] = None,
+        top_n_labels: int = 12,
+        outpath: Optional[str | Path] = None,
 ) -> pd.DataFrame:
     """Generate volcano plot for T-subset comparison pooled over PD1.
 
@@ -382,6 +418,10 @@ def volcano_tsubset_pooled_pd1(
     pd.DataFrame
         The contrast results table.
     """
+    # Normalize for display in title
+    tsubset_p_norm = normalize_phenotype(tsubset_p)
+    tsubset_q_norm = normalize_phenotype(tsubset_q)
+
     tab = motif_contrast_table_tsubset_pooled_pd1(
         fit, motifs, tsubset_p=tsubset_p, tsubset_q=tsubset_q, pd1_levels=pd1_levels
     )
@@ -389,7 +429,7 @@ def volcano_tsubset_pooled_pd1(
         tab,
         q_thresh=q_thresh,
         lfc_thresh=lfc_thresh,
-        title=title or f"{tsubset_p} vs {tsubset_q}",
+        title=title or f"{tsubset_p_norm} vs {tsubset_q_norm}",
         top_n_labels=top_n_labels,
         outpath=outpath,
     )
@@ -397,17 +437,17 @@ def volcano_tsubset_pooled_pd1(
 
 
 def volcano_pd1_pooled_tsubset(
-    fit,
-    motifs: Iterable[str],
-    *,
-    tsubsets: Sequence[str] = ("Naïve", "CM", "EM"),
-    pd1_high: str = "High",
-    pd1_low: str = "Low",
-    q_thresh: float = 0.10,
-    lfc_thresh: float = 1.0,
-    title: Optional[str] = None,
-    top_n_labels: int = 12,
-    outpath: Optional[str | Path] = None,
+        fit,
+        motifs: Iterable[str],
+        *,
+        tsubsets: Sequence[str] = ("Naive", "CM", "EM"),
+        pd1_high: str = "High",
+        pd1_low: str = "Low",
+        q_thresh: float = 0.10,
+        lfc_thresh: float = 1.0,
+        title: Optional[str] = None,
+        top_n_labels: int = 12,
+        outpath: Optional[str | Path] = None,
 ) -> pd.DataFrame:
     """Generate volcano plot for PD1 comparison pooled over T-subsets.
 
@@ -420,7 +460,7 @@ def volcano_pd1_pooled_tsubset(
         Fitted model result.
     motifs : iterable of str
         Names of motif features to test.
-    tsubsets : sequence of str, default ("Naïve", "CM", "EM")
+    tsubsets : sequence of str, default ("Naive", "CM", "EM")
         T-subsets to pool over.
     pd1_high : str, default "High"
         Label for PD1 high.

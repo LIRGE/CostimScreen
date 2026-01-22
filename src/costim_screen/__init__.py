@@ -21,7 +21,7 @@ contrasts
 stats
     Statistical utilities including FDR correction.
 plots
-    Visualization functions (volcano plots).
+    Visualization functions (volcano plots, coefficient heatmaps).
 pooled
     Pooled contrast analyses across phenotype groups.
 diagnostics
@@ -45,6 +45,7 @@ from .contrasts import (
     coef_name_for_motif_phenotype,
     motif_diff_between_phenotypes,
     wald_contrast,
+    wald_contrast_full,
 )
 
 # diagnostics
@@ -111,7 +112,7 @@ from .preprocess import (
     add_library_size,
     counts_to_long,
     filter_domains_by_total_counts,
-    make_block_id,
+    make_ccr_id,
 )
 
 # stats
@@ -125,6 +126,7 @@ __all__ = [
     "coef_name_for_motif_phenotype",
     "motif_diff_between_phenotypes",
     "wald_contrast",
+    "wald_contrast_full",
     # diagnostics
     "estimate_alpha_nb2_moments",
     "per_sample_dispersion",
@@ -167,7 +169,7 @@ __all__ = [
     "add_library_size",
     "counts_to_long",
     "filter_domains_by_total_counts",
-    "make_block_id",
+    "make_ccr_id",
     # stats
     "bh_fdr",
     "motif_contrast_table",

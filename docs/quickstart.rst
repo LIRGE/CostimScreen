@@ -64,7 +64,7 @@ Convert to long format and add sample-level variables:
 
    # Add derived variables
    smeta["phenotype"] = smeta["Tsubset"] + "_" + smeta["PD1Status"]
-   smeta["block"] = cs.make_block_id(smeta)
+   smeta["CCR"] = cs.make_ccr_id(smeta)
 
    # Convert to long format
    df = cs.counts_to_long(counts, id_col="CandidateID")
@@ -97,7 +97,7 @@ Fit a negative binomial GLM with motif-phenotype interactions:
        df_raji,
        formula=formula,
        offset_col="offset",
-       cluster_col="block"
+       cluster_col="CCR"
    )
 
    print(f"Estimated dispersion: {fit.alpha:.3f}")

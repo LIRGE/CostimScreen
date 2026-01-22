@@ -86,7 +86,7 @@ X_elm = X_elm.rename(columns=mapping)
 
 # Prepare long-format data
 smeta["phenotype"] = smeta["Tsubset"] + "_" + smeta["PD1Status"]
-smeta["block"] = cs.make_block_id(smeta)
+smeta["CCR"] = cs.make_ccr_id(smeta)
 
 df = cs.counts_to_long(counts, id_col="CandidateID")
 df = df.merge(smeta.reset_index(), on="sample_id", how="left")
@@ -97,7 +97,7 @@ df = df.merge(X_elm.reset_index().rename(columns={"index": "CandidateID"}),
 # Fit model
 motif_cols = list(X_elm.columns)
 formula = cs.build_joint_formula(motif_cols)
-fit = cs.fit_nb_glm_iter_alpha(df, formula=formula, offset_col="offset", cluster_col="block")
+fit = cs.fit_nb_glm_iter_alpha(df, formula=formula, offset_col="offset", cluster_col="CCR")
 
 # Compute contrasts and generate volcano plot
 result = cs.motif_contrast_table(fit, motifs=motif_cols, p="EM_High", q="CM_High")

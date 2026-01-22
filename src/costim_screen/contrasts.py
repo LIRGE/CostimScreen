@@ -11,14 +11,16 @@ coef_name_for_motif_phenotype
     Generate the coefficient name for a motif-phenotype interaction.
 motif_diff_between_phenotypes
     Build a contrast vector for comparing motif effects between phenotypes.
-wald_contrast
+wald_contrast_full
     Perform a Wald test on a linear contrast.
 """
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Any, Tuple
 
 import numpy as np
+
+from .utils import normalize_phenotype
 
 
 def coef_name_for_motif_phenotype(motif: str, phenotype: str) -> str:
@@ -44,11 +46,13 @@ def coef_name_for_motif_phenotype(motif: str, phenotype: str) -> str:
     >>> coef_name_for_motif_phenotype("ELM_SH3", "EM_High")
     'ELM_SH3:C(phenotype)[EM_High]'
     """
+    # Normalize phenotype to ASCII for consistent matching
+    phenotype = normalize_phenotype(phenotype)
     return f"{motif}:C(phenotype)[{phenotype}]"
 
 
 def motif_diff_between_phenotypes(
-    fit, motif: str, p: str, q: str
+        fit, motif: str, p: str, q: str
 ) -> Tuple[np.ndarray, str]:
     """Build a contrast vector for comparing motif effects between phenotypes.
 
@@ -85,6 +89,10 @@ def motif_diff_between_phenotypes(
     >>> print(name)
     ELM_SH3: EM_High - CM_High
     """
+    # Normalize phenotypes to ASCII
+    p = normalize_phenotype(p)
+    q = normalize_phenotype(q)
+
     cols = fit.data_cols
     L = np.zeros((1, len(cols)))
 
@@ -102,10 +110,24 @@ def motif_diff_between_phenotypes(
 
 
 def wald_contrast(
-    fit,
-    L: np.ndarray,
-    name: str,
+        fit: Any,
+        L: np.ndarray,
+        name: str
 ) -> Tuple[float, float]:
+    """Compatibility wrapper returning (estimate, pvalue).
+
+    For new code, prefer :func:`wald_contrast_full` which returns
+    full test statistics (estimate, SE, z-value, p-value).
+    """
+    est, se, z, p = wald_contrast_full(fit, L, name)
+    return est, p
+
+
+def wald_contrast_full(
+        fit: Any,
+        L: np.ndarray,
+        _name: str,
+) -> Tuple[float, float, float, float]:
     """Perform a Wald test on a linear contrast.
 
     Computes the estimate and p-value for a linear combination of
@@ -117,27 +139,33 @@ def wald_contrast(
         Fitted model result from :func:`fit_nb_glm_iter_alpha`.
     L : np.ndarray
         Contrast vector of shape (1, n_coefficients).
-    name : str
-        Descriptive name for the contrast (for error messages).
+    _name : str
+        Descriptive name for the contrast (kept for API consistency).
 
     Returns
     -------
     estimate : float
         The estimated value of L @ beta (on the log scale).
+    standard error: float
+        The standard error of the estimate.
+    zvalue: float
+        The z-score of the estimate.
     pvalue : float
         Two-sided p-value from the Wald test.
 
     Examples
     --------
     >>> L, name = motif_diff_between_phenotypes(fit, "ELM_SH3", "EM_High", "CM_High")
-    >>> est, pval = wald_contrast(fit, L, name)
-    >>> print(f"Effect: {est:.3f}, p-value: {pval:.3e}")
-    Effect: 0.523, p-value: 1.234e-05
+    >>> est, se, z, pval = wald_contrast_full(fit, L, name)
+    >>> print(f"Effect: {est:.3f}, SE: {se:.3e}, Z: {z:.3e}, p-value: {pval:.3e}")
+    Effect: 0.523, SE: 0.123, Z: 1.234, p-value: 1.234e-05
     """
     test = fit.res.t_test(L)
+
     # Handle both scalar and array results
-    effect = test.effect
-    pvalue = test.pvalue
-    est = float(effect.item()) if hasattr(effect, "item") else float(effect)
-    p = float(pvalue.item()) if hasattr(pvalue, "item") else float(pvalue)
-    return est, p
+    est = float(np.asarray(test.effect).item())
+    se = float(np.asarray(test.sd).item())
+    z = float(np.asarray(test.tvalue).item())
+    p = float(np.asarray(test.pvalue).item())
+
+    return est, se, z, p
