@@ -160,7 +160,14 @@ def wald_contrast_full(
     >>> print(f"Effect: {est:.3f}, SE: {se:.3e}, Z: {z:.3e}, p-value: {pval:.3e}")
     Effect: 0.523, SE: 0.123, Z: 1.234, p-value: 1.234e-05
     """
-    test = fit.res.t_test(L)
+    try:
+        test = fit.res.t_test(L)
+    except Exception as e:
+        raise RuntimeError(
+            "Wald contrast failed. This often happens if the model was fit using "
+            "regularization (fit_regularized) and does not provide a usable covariance "
+            "matrix/t_test implementation."
+        ) from e
 
     # Handle both scalar and array results
     est = float(np.asarray(test.effect).item())

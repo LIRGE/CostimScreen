@@ -16,6 +16,8 @@ metadata_setup
     Metadata parsing and candidate information merging.
 model
     Negative binomial GLM fitting with iterative dispersion estimation.
+dirichlet_multinomial
+    Dirichlet-Multinomial model for compositional phenotype data.
 contrasts
     Wald contrast computations for motif effects.
 stats
@@ -90,6 +92,16 @@ from .model import (
     fit_nb_glm_iter_alpha,
 )
 
+# dirichlet_multinomial
+from .dirichlet_multinomial import (
+    DirichletMultinomialData,
+    DirichletMultinomialResult,
+    fit_dm_model,
+    prepare_dm_data,
+    simulate_dm_data,
+    PHENOTYPES,
+)
+
 # plots
 from .plots import (
     coef_heatmap,
@@ -154,6 +166,13 @@ __all__ = [
     "FitResult",
     "build_joint_formula",
     "fit_nb_glm_iter_alpha",
+    # dirichlet_multinomial
+    "DirichletMultinomialData",
+    "DirichletMultinomialResult",
+    "fit_dm_model",
+    "prepare_dm_data",
+    "simulate_dm_data",
+    "PHENOTYPES",
     # plots
     "coef_heatmap",
     "pooled_coef_heatmap",

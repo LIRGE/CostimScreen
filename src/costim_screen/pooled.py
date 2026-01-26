@@ -36,7 +36,10 @@ from .stats import bh_fdr
 from .utils import normalize_phenotype
 
 
-def _phenotype_label(tsubset: str, pd1: str) -> str:
+def _phenotype_label(
+        tsubset: str,
+        pd1: str
+) -> str:
     """Construct phenotype label from T-subset and PD1 status.
 
     Normalizes both components to ASCII before joining.
