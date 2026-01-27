@@ -28,7 +28,8 @@ dependencies = [
     "patsy>=0.5",
     "scipy>=1.10",
     "seaborn>=0.12",
-    "statsmodels>=0.14"
+    "statsmodels>=0.14",
+    "tqdm>=4.65"
 ]
 
 [project.optional-dependencies]

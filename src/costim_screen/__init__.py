@@ -133,6 +133,25 @@ from .stats import (
     motif_contrast_table,
 )
 
+# utils (visualization helpers)
+from .utils import (
+    normalize_phenotype,
+    dm_volcano_plot,
+    dm_pooled_tsubset_contrast,
+    dm_pooled_pd1_contrast,
+    dm_coef_heatmap,
+    dm_pooled_heatmap,
+    assemble_dm_main_figure,
+    cliffs_delta,
+    mann_whitney_elm_test,
+    mw_volcano_plot,
+    compute_pearson_residuals,
+    run_mw_analysis_for_phenotype,
+    compute_pooled_tsubset_effect,
+    get_sig_stars,
+    create_elm_name_mapping,
+)
+
 __all__ = [
     # contrasts
     "coef_name_for_motif_phenotype",
@@ -192,4 +211,20 @@ __all__ = [
     # stats
     "bh_fdr",
     "motif_contrast_table",
+    # utils
+    "normalize_phenotype",
+    "dm_volcano_plot",
+    "dm_pooled_tsubset_contrast",
+    "dm_pooled_pd1_contrast",
+    "dm_coef_heatmap",
+    "dm_pooled_heatmap",
+    "assemble_dm_main_figure",
+    "cliffs_delta",
+    "mann_whitney_elm_test",
+    "mw_volcano_plot",
+    "compute_pearson_residuals",
+    "run_mw_analysis_for_phenotype",
+    "compute_pooled_tsubset_effect",
+    "get_sig_stars",
+    "create_elm_name_mapping",
 ]
