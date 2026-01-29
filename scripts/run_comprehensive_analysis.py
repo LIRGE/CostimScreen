@@ -2,19 +2,35 @@
 """
 Comprehensive analysis script for CAR-T costimulatory domain screen.
 
-Runs 4 analysis methods on multiple CCD subsets:
+Analyzes how Costimulatory Cytoplasmic Domains (CCDs) affect CAR-T cell phenotype
+distributions. Each CCD contains one or more Eukaryotic Linear Motifs (ELMs)—short
+functional sequence patterns that mediate protein interactions and signaling.
+
+Runs 5 analysis methods on multiple CCD subsets:
 
 Subsets:
 - non_gpcr: All non-GPCR CCDs (no ICD conditioning)
-- non_gpcr_1, non_gpcr_2, non_gpcr_3_4: Non-GPCR by ICD ID
+- non_gpcr_1, non_gpcr_2, non_gpcr_3, non_gpcr_4: Non-GPCR by ICD ID (separate - too heterogeneous)
 - gpcr: All GPCR CCDs (no ICD conditioning)
-- gpcr_1, gpcr_2, gpcr_3, gpcr_4: GPCR by ICD ID
+- gpcr_1, gpcr_2: GPCR by ICD ID
+- gpcr_3_4: GPCR with ICD 3+4 combined (both are signaling domains)
 
-Analysis methods:
-1. Mann-Whitney (mw): Pearson residuals + rank-based comparison
-2. Joint NB-GLM (joint_nbglm): Single model with all phenotypes
-3. Phenotype NB-GLM (phenotype_nbglm): Pooled T-subset models
+Analysis methods (ELM-level - individual motif effects):
+Tests impact of individual ELMs by comparing CCDs with vs without each motif.
+May detect effects on proliferation but typically not phenotype-specific effects.
+1. Mann-Whitney (mw): Pearson residuals + rank-based comparison by ELM
+2. Joint NB-GLM (joint_nbglm): Single model with all phenotypes and ELM interactions
+3. Phenotype NB-GLM (phenotype_nbglm): Pooled T-subset models by ELM
 4. Dirichlet-Multinomial (dm): Compositional model with PIP-based significance
+
+Analysis methods (CCD-level - combinatorial effects):
+Tests individual constructs representing specific ELM combinations.
+Reveals phenotype-specific effects from particular motif combinations.
+5. CCD Dirichlet-Multinomial (ccd_dm): G-test with leave-one-out comparison
+
+Note: CCD-level MW and NB-GLM were removed because DM properly tests
+compositional differences (appropriate for phenotype proportions) and showed
+better statistical properties at individual construct level.
 
 Contrasts of interest:
 - EM vs CM (pooled over PD1)
@@ -33,8 +49,28 @@ FDR correction method is controlled by FDR_METHOD variable:
   - "phenotype": BH correction within each phenotype/contrast (less conservative)
 
 Default is "phenotype" for increased sensitivity.
+
+Output Structure:
+-----------------
+results/
+  {subset}/
+    elm_analysis/          # ELM-level (grouped by motif)
+      mw_analysis/
+      joint_nbglm_analysis/
+      phenotype_nbglm_analysis/
+      dm_analysis/
+    ccd_analysis/          # CCD-level (individual constructs)
+      dm_analysis/         # G-test with volcano plots and heatmaps
+
+Volcano Plot Features:
+---------------------
+- Priority labeling for key costimulatory domains (4-1BB, CD28, OX40, etc.)
+- Display aliases map systematic names to common gene names (TNFRSF9 -> 4-1BB)
+- adjustText library for label repulsion (optional, install with: pip install adjustText)
+- Y-axis extended slightly above max to accommodate labels at saturation
 """
 
+import re
 import sys
 import warnings
 from pathlib import Path
@@ -50,8 +86,88 @@ BASE_PATH = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_PATH / 'src'))
 
 import costim_screen as cs
+import statsmodels.api as sm
 
 warnings.filterwarnings('ignore')
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def estimate_alpha_nb2_moments(y: np.ndarray, mu: np.ndarray) -> float:
+    """Estimate NB2 dispersion parameter using method of moments.
+
+    Var(Y) = mu + alpha * mu^2
+    Solves: sum((y - mu)^2 - mu) = alpha * sum(mu^2)
+    """
+    resid_sq = (y - mu) ** 2
+    numerator = np.sum(resid_sq - mu)
+    denominator = np.sum(mu ** 2)
+    if denominator > 0:
+        alpha = numerator / denominator
+        return max(alpha, 1e-8)  # Ensure non-negative
+    return 0.1  # Default fallback
+
+
+def fit_nbglm_iter_alpha_simple(y, X, max_iter=8, alpha_init=0.1):
+    """Fit NB-GLM with iterative alpha estimation.
+
+    Similar to cs.fit_nb_glm_iter_alpha but for simple X, y inputs
+    (no formula, no offset).
+
+    Returns
+    -------
+    res : GLMResults or None
+        Fitted model results, or None if fitting failed
+    alpha : float
+        Final estimated dispersion parameter
+    """
+    alpha = float(alpha_init)
+    res = None
+
+    for iteration in range(max_iter):
+        try:
+            model = sm.GLM(y, X, family=sm.families.NegativeBinomial(alpha=alpha))
+            res = model.fit(maxiter=200, tol=1e-8)
+        except (ValueError, np.linalg.LinAlgError):
+            # Try BFGS if IRLS fails
+            try:
+                res = model.fit(maxiter=200, method='bfgs')
+            except Exception:
+                # Last resort: use current alpha and stop
+                break
+
+        if res is None:
+            break
+
+        # Update alpha using method of moments
+        mu = res.fittedvalues
+        alpha_new = estimate_alpha_nb2_moments(y, mu)
+
+        # Stabilize updates (average with old value)
+        alpha_new = 0.5 * alpha + 0.5 * alpha_new
+
+        # Bound alpha to reasonable range
+        alpha_new = np.clip(alpha_new, 1e-4, 100.0)
+
+        # Check convergence
+        if abs(alpha_new - alpha) / (alpha + 1e-9) < 0.05:
+            alpha = alpha_new
+            break
+
+        alpha = alpha_new
+
+    # Final fit with converged alpha
+    if res is not None:
+        try:
+            model_final = sm.GLM(y, X, family=sm.families.NegativeBinomial(alpha=float(alpha)))
+            res = model_final.fit(maxiter=200, tol=1e-8)
+        except Exception:
+            pass  # Keep previous res
+
+    return res, alpha
+
 
 # =============================================================================
 # Configuration
@@ -142,12 +258,17 @@ def apply_fdr_correction(df, pvalue_col="pvalue", group_col="phenotype"):
 
 def load_and_filter_data(subset_type: str) -> tuple:
     """
-    Load data and filter to specified subset.
+    Load data and filter to specified CCD subset.
 
     Parameters
     ----------
     subset_type : str
-        Either 'non_gpcr' or 'gpcr_icd34'
+        Subset identifier. Options:
+        - 'non_gpcr': All non-GPCR CCDs (no ICD conditioning)
+        - 'non_gpcr_1', 'non_gpcr_2', 'non_gpcr_3', 'non_gpcr_4': Non-GPCR by ICD ID
+        - 'gpcr': All GPCR CCDs (no ICD conditioning)
+        - 'gpcr_1', 'gpcr_2': GPCR by ICD ID
+        - 'gpcr_3_4': GPCR with ICD 3+4 combined (both signaling domains)
 
     Returns
     -------
@@ -156,13 +277,13 @@ def load_and_filter_data(subset_type: str) -> tuple:
     counts_wide : pd.DataFrame
         Full count matrix (for NB-GLM)
     cand : pd.DataFrame
-        Candidate metadata
+        Candidate metadata filtered to subset
     smeta : pd.DataFrame
         Sample metadata
     elm_df : pd.DataFrame
-        ELM assignments
+        ELM assignments for CCDs in subset
     all_elms : list
-        List of unique ELMs
+        List of unique ELMs in subset
     """
     # Load data
     counts_wide = cs.load_counts_matrix(
@@ -207,11 +328,6 @@ def load_and_filter_data(subset_type: str) -> tuple:
         mask = cand['is_gpcr'] == 0
         subset_ids = cand.index[mask]
         print(f"Non-GPCR CCDs (any ICD ID): {len(subset_ids)}")
-    elif subset_type == 'non_gpcr_3_4':
-        # Non-GPCR with ICD ID in {3, 4} (combined due to small sample sizes)
-        mask = (cand['is_gpcr'] == 0) & (cand['ICD_ID'].isin([3, 4]))
-        subset_ids = cand.index[mask]
-        print(f"Non-GPCR CCDs with ICD ID in {{3,4}}: {len(subset_ids)}")
     elif subset_type.startswith('non_gpcr_'):
         # Non-GPCR with specific ICD ID (e.g., non_gpcr_1, non_gpcr_2, etc.)
         icd_id = int(subset_type.split('_')[-1])
@@ -223,17 +339,17 @@ def load_and_filter_data(subset_type: str) -> tuple:
         mask = cand['is_gpcr'] == 1
         subset_ids = cand.index[mask]
         print(f"GPCR CCDs (any ICD ID): {len(subset_ids)}")
+    elif subset_type == 'gpcr_3_4':
+        # GPCR with ICD ID in {3, 4} (combined - both are signaling domains)
+        mask = (cand['is_gpcr'] == 1) & (cand['ICD_ID'].isin([3, 4]))
+        subset_ids = cand.index[mask]
+        print(f"GPCR CCDs with ICD ID in {{3,4}} (signaling domains): {len(subset_ids)}")
     elif subset_type.startswith('gpcr_'):
         # GPCR with specific ICD ID (e.g., gpcr_1, gpcr_2, etc.)
         icd_id = int(subset_type.split('_')[-1])
         mask = (cand['is_gpcr'] == 1) & (cand['ICD_ID'] == icd_id)
         subset_ids = cand.index[mask]
         print(f"GPCR CCDs with ICD ID = {icd_id}: {len(subset_ids)}")
-    elif subset_type == 'gpcr_icd34':
-        # GPCR with ICD ID in {3, 4} (legacy)
-        mask = (cand['is_gpcr'] == 1) & (cand['ICD_ID'].isin([3, 4]))
-        subset_ids = cand.index[mask]
-        print(f"GPCR CCDs with ICD ID in {{3,4}}: {len(subset_ids)}")
     else:
         raise ValueError(f"Unknown subset_type: {subset_type}")
 
@@ -594,8 +710,8 @@ def run_joint_nbglm_analysis(counts_wide, cand, smeta, elm_df, all_elms, output_
         # Build ELM design matrix with patsy-safe names
         # For small datasets, we need stricter filtering to avoid rank-deficiency
         n_ccds = len(cand)
-        min_elm_count = max(3, int(0.05 * n_ccds))  # At least 5% of CCDs or 3
-        max_elm_count = int(0.95 * n_ccds)  # At most 95% of CCDs
+        min_elm_count = max(3, int(0.01 * n_ccds))  # At least 1% of CCDs or 3
+        max_elm_count = n_ccds  # No upper limit
 
         X_elm = cs.build_elm_design(
             cand,
@@ -605,11 +721,11 @@ def run_joint_nbglm_analysis(counts_wide, cand, smeta, elm_df, all_elms, output_
 
         # Filter out ELMs that are too rare or too common (causes rank deficiency)
         elm_counts = X_elm.sum(axis=0)
-        valid_elms = (elm_counts >= min_elm_count) & (elm_counts <= max_elm_count)
+        valid_elms = (elm_counts >= min_elm_count)  # No upper limit
         X_elm = X_elm.loc[:, valid_elms]
 
         if len(X_elm.columns) == 0:
-            print(f"  No ELMs pass frequency filter (need {min_elm_count}-{max_elm_count} CCDs)")
+            print(f"  No ELMs pass frequency filter (need >= {min_elm_count} CCDs)")
             return pd.DataFrame()
 
         # Make patsy-safe column names
@@ -788,7 +904,7 @@ def run_phenotype_nbglm_analysis(counts_wide, cand, smeta, elm_df, all_elms, out
     This approach:
     1. Pools High+Low for each T-subset (CM, EM, Naive) - 12 samples per model
     2. Fits separate NB-GLM per POOLED T-subset with ALL ELMs as covariates
-    3. Uses fixed dispersion alpha=1.15
+    3. Uses iterative alpha estimation (method of moments, like joint NB-GLM)
     4. Computes Wald tests comparing coefficients between pooled T-subsets
     5. Applies BH-FDR correction to contrast p-values
     """
@@ -813,19 +929,19 @@ def run_phenotype_nbglm_analysis(counts_wide, cand, smeta, elm_df, all_elms, out
                 X_elm_full[i, all_unique_elms.index(elm)] = 1
 
         # Filter ELMs: need at least 5% of CCDs (or 3) and at most 95%
-        min_elm_count = max(3, int(0.05 * n_ccds))
-        max_elm_count = int(0.95 * n_ccds)
+        min_elm_count = max(3, int(0.01 * n_ccds))  # At least 1% of CCDs or 3
+        max_elm_count = n_ccds  # No upper limit
         elm_counts = X_elm_full.sum(axis=0)
-        valid_elm_mask = (elm_counts >= min_elm_count) & (elm_counts <= max_elm_count)
+        valid_elm_mask = (elm_counts >= min_elm_count)
 
         unique_elms = [elm for elm, valid in zip(all_unique_elms, valid_elm_mask) if valid]
         X_elm = X_elm_full[:, valid_elm_mask]
 
         if len(unique_elms) == 0:
-            print(f"  No ELMs pass frequency filter (need {min_elm_count}-{max_elm_count} CCDs)")
+            print(f"  No ELMs pass frequency filter (need >= {min_elm_count} CCDs)")
             return pd.DataFrame()
 
-        print(f"  ELM features: {len(unique_elms)} (filtered, need {min_elm_count}-{max_elm_count} CCDs)")
+        print(f"  ELM features: {len(unique_elms)} (filtered, need >= {min_elm_count} CCDs)")
 
         # Fit pooled models for each T-subset (pooling High+Low)
         tsubset_fits = {}
@@ -853,30 +969,21 @@ def run_phenotype_nbglm_analysis(counts_wide, cand, smeta, elm_df, all_elms, out
             # Add intercept
             X_stacked = sm.add_constant(X_stacked, has_constant='add')
 
-            # Fit NB-GLM with fixed alpha=1.15, with fallback methods
-            res = None
-            for method, alpha in [('IRLS', 1.15), ('bfgs', 1.15), ('bfgs', 1.0), ('bfgs', 0.5)]:
-                try:
-                    model = sm.GLM(y, X_stacked, family=sm.families.NegativeBinomial(alpha=alpha))
-                    if method == 'IRLS':
-                        res = model.fit(maxiter=200, tol=1e-8)
-                    else:
-                        res = model.fit(maxiter=200, method=method)
-                    break  # Success
-                except (ValueError, np.linalg.LinAlgError) as e:
-                    if method == 'bfgs' and alpha == 0.5:
-                        print(f"    {tsubset} fitting failed with all methods: {e}")
-                    continue
+            # Fit NB-GLM with iterative alpha estimation (like joint model)
+            res, alpha_final = fit_nbglm_iter_alpha_simple(y, X_stacked, max_iter=8, alpha_init=0.1)
 
             if res is None:
                 print(f"    Skipping {tsubset} (all fitting methods failed)")
                 continue
+
+            print(f"    {tsubset} alpha={alpha_final:.3f}")
 
             tsubset_fits[tsubset] = {
                 'params': res.params[1:],  # Skip intercept
                 'bse': res.bse[1:],
                 'pvalues': res.pvalues[1:],
                 'tvalues': res.tvalues[1:],
+                'alpha': alpha_final,
             }
 
         if len(tsubset_fits) < 2:
@@ -913,7 +1020,7 @@ def run_phenotype_nbglm_analysis(counts_wide, cand, smeta, elm_df, all_elms, out
                 })
 
         # Also compute PD1 contrast (High vs Low, pooled over T-subsets)
-        # Fit High and Low pooled models
+        # Fit High and Low pooled models with iterative alpha
         for pd1 in ['High', 'Low']:
             pd1_cols = [c for c in raji_cols if pd1 in c]
             n_samples = len(pd1_cols)
@@ -925,25 +1032,18 @@ def run_phenotype_nbglm_analysis(counts_wide, cand, smeta, elm_df, all_elms, out
             X_stacked = np.repeat(X_elm, n_samples, axis=0)
             X_stacked = sm.add_constant(X_stacked, has_constant='add')
 
-            # Fit with fallback methods
-            res = None
-            for method, alpha in [('IRLS', 1.15), ('bfgs', 1.15), ('bfgs', 1.0), ('bfgs', 0.5)]:
-                try:
-                    model = sm.GLM(y, X_stacked, family=sm.families.NegativeBinomial(alpha=alpha))
-                    if method == 'IRLS':
-                        res = model.fit(maxiter=200, tol=1e-8)
-                    else:
-                        res = model.fit(maxiter=200, method=method)
-                    break
-                except (ValueError, np.linalg.LinAlgError):
-                    continue
+            # Fit NB-GLM with iterative alpha estimation
+            res, alpha_final = fit_nbglm_iter_alpha_simple(y, X_stacked, max_iter=8, alpha_init=0.1)
 
             if res is None:
                 continue
 
+            print(f"    PD1-{pd1} alpha={alpha_final:.3f}")
+
             tsubset_fits[pd1] = {
                 'params': res.params[1:],
                 'bse': res.bse[1:],
+                'alpha': alpha_final,
             }
 
         # PD1 Low vs High contrast
@@ -1888,6 +1988,1250 @@ def create_dm_pooled_heatmap_pip(pip_df, effect_df, sig_df, plots_path, output_p
 
 
 # =============================================================================
+# CCD-Level Analyses (Individual Constructs)
+# =============================================================================
+
+def run_ccd_mw_analysis(counts_raji, cand, output_path):
+    """
+    Run Mann-Whitney analysis at CCD level (individual constructs).
+
+    For each CCD, compares its Pearson residuals against all other CCDs
+    (one-vs-rest comparison) for each phenotype.
+
+    This provides a validation layer: ELM-level hits should be supported
+    by individual CCD effects in the same direction.
+    """
+    print("\n=== Running CCD-Level Mann-Whitney Analysis ===")
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Compute Pearson residuals
+    residuals_df = cs.compute_pearson_residuals(counts_raji)
+
+    all_ccds = residuals_df.index.tolist()
+    print(f"  Testing {len(all_ccds)} CCDs")
+
+    all_results = []
+
+    for pheno, pattern in RAJI_PHENOTYPE_PATTERNS.items():
+        # Get columns matching this phenotype
+        pheno_cols = [c for c in residuals_df.columns if pattern in c]
+        if not pheno_cols:
+            continue
+
+        # Get residuals for this phenotype (average across replicates)
+        pheno_residuals = residuals_df[pheno_cols].mean(axis=1)
+
+        for ccd in all_ccds:
+            # One-vs-rest comparison
+            ccd_val = pheno_residuals.loc[ccd]
+            other_vals = pheno_residuals.drop(ccd).values
+
+            # Mann-Whitney U test
+            try:
+                stat, pval = stats.mannwhitneyu(
+                    [ccd_val], other_vals,
+                    alternative='two-sided'
+                )
+                # For single observation, use rank-based effect size
+                rank = stats.rankdata(np.append(other_vals, ccd_val))[-1]
+                # Cliff's delta approximation for single vs many
+                n_other = len(other_vals)
+                cliff_delta = 2 * (rank - 1) / n_other - 1
+            except Exception:
+                pval = 1.0
+                cliff_delta = 0.0
+
+            all_results.append({
+                'CCD': ccd,
+                'phenotype': pheno,
+                'residual': ccd_val,
+                'cliff_delta': cliff_delta,
+                'pvalue': pval,
+            })
+
+    if not all_results:
+        print("  No results generated")
+        return pd.DataFrame()
+
+    results_df = pd.DataFrame(all_results)
+
+    # Apply FDR correction per phenotype
+    results_df['qvalue'] = apply_fdr_correction(results_df, 'pvalue', 'phenotype')
+
+    # Compute pooled T-subset effects for each CCD
+    pooled_results = []
+    for ccd in all_ccds:
+        ccd_data = results_df[results_df['CCD'] == ccd]
+
+        for ts in TSUBSETS:
+            ts_data = ccd_data[ccd_data['phenotype'].str.startswith(ts)]
+            if len(ts_data) == 0:
+                continue
+
+            pooled_results.append({
+                'CCD': ccd,
+                'tsubset': ts,
+                'cliff_delta': ts_data['cliff_delta'].mean(),
+                'pvalue': ts_data['pvalue'].min() * len(ts_data),  # Bonferroni
+            })
+
+    pooled_df = pd.DataFrame(pooled_results)
+    if len(pooled_df) > 0:
+        pooled_df['pvalue'] = pooled_df['pvalue'].clip(upper=1.0)
+        pooled_df['qvalue'] = apply_fdr_correction(pooled_df, 'pvalue', 'tsubset')
+
+    # Compute T-subset contrasts
+    contrast_results = []
+    for ccd in all_ccds:
+        ccd_pooled = pooled_df[pooled_df['CCD'] == ccd]
+
+        for ts1, ts2 in TSUBSET_CONTRASTS:
+            ts1_data = ccd_pooled[ccd_pooled['tsubset'] == ts1]
+            ts2_data = ccd_pooled[ccd_pooled['tsubset'] == ts2]
+
+            if len(ts1_data) == 0 or len(ts2_data) == 0:
+                continue
+
+            delta1 = ts1_data['cliff_delta'].iloc[0]
+            delta2 = ts2_data['cliff_delta'].iloc[0]
+            diff = delta1 - delta2
+
+            # Combine p-values
+            p1 = ts1_data['pvalue'].iloc[0] if 'pvalue' in ts1_data.columns else 1.0
+            p2 = ts2_data['pvalue'].iloc[0] if 'pvalue' in ts2_data.columns else 1.0
+            combined_p = min(p1, p2) * 2
+            combined_p = min(combined_p, 1.0)
+
+            contrast_results.append({
+                'CCD': ccd,
+                'contrast': f"{ts1}_vs_{ts2}",
+                'effect_ts1': delta1,
+                'effect_ts2': delta2,
+                'diff': diff,
+                'pvalue': combined_p,
+            })
+
+    contrast_df = pd.DataFrame(contrast_results)
+    if len(contrast_df) > 0:
+        contrast_df['qvalue'] = apply_fdr_correction(contrast_df, 'pvalue', 'contrast')
+
+    # Compute PD1 contrast
+    pd1_results = []
+    for ccd in all_ccds:
+        ccd_data = results_df[results_df['CCD'] == ccd]
+
+        high_data = ccd_data[ccd_data['phenotype'].str.contains('High')]
+        low_data = ccd_data[ccd_data['phenotype'].str.contains('Low')]
+
+        if len(high_data) == 0 or len(low_data) == 0:
+            continue
+
+        high_effect = high_data['cliff_delta'].mean()
+        low_effect = low_data['cliff_delta'].mean()
+        diff = low_effect - high_effect
+
+        all_p = list(high_data['pvalue']) + list(low_data['pvalue'])
+        combined_p = min(all_p) * len(all_p)
+        combined_p = min(combined_p, 1.0)
+
+        pd1_results.append({
+            'CCD': ccd,
+            'contrast': 'PD1Low_vs_PD1High',
+            'effect_low': low_effect,
+            'effect_high': high_effect,
+            'diff': diff,
+            'pvalue': combined_p,
+        })
+
+    pd1_df = pd.DataFrame(pd1_results)
+    if len(pd1_df) > 0:
+        pd1_df['qvalue'] = cs.bh_fdr(pd1_df['pvalue'])
+
+    # Save results
+    results_df.to_csv(output_path / "ccd_mw_all_results.csv", index=False)
+    pooled_df.to_csv(output_path / "ccd_mw_pooled_tsubset.csv", index=False)
+    contrast_df.to_csv(output_path / "ccd_mw_tsubset_contrasts.csv", index=False)
+    pd1_df.to_csv(output_path / "ccd_mw_pd1_contrast.csv", index=False)
+
+    # Create volcano plots
+    plots_path = output_path / 'plots'
+    plots_path.mkdir(exist_ok=True)
+    create_ccd_volcano_plots(contrast_df, pd1_df, plots_path, "MW")
+
+    print(f"  Saved CCD-level MW results to {output_path}")
+    return contrast_df
+
+
+def run_ccd_phenotype_nbglm_analysis(counts_wide, cand, smeta, output_path):
+    """
+    Run phenotype NB-GLM analysis at CCD level.
+
+    For each CCD, fits a simple model comparing its effect to baseline
+    within each pooled T-subset.
+
+    This is computationally intensive but provides CCD-specific effect estimates.
+    """
+    print("\n=== Running CCD-Level Phenotype NB-GLM Analysis ===")
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    import statsmodels.api as sm
+
+    try:
+        # Filter to Raji samples
+        raji_cols = [c for c in counts_wide.columns if 'CAR:Raji' in c]
+        counts_raji = counts_wide[raji_cols]
+
+        all_ccds = counts_raji.index.tolist()
+        n_ccds = len(all_ccds)
+        print(f"  Testing {n_ccds} CCDs")
+
+        # For each T-subset, fit a model with CCD indicators
+        # This is expensive, so we use a simplified approach:
+        # Compute per-CCD z-scores relative to mean
+
+        tsubset_results = {}
+
+        for tsubset in TSUBSETS:
+            tsubset_pattern = tsubset if tsubset != "Naive" else "Naïve"
+            tsubset_cols = [c for c in raji_cols if tsubset_pattern in c]
+
+            if not tsubset_cols:
+                continue
+
+            # Sum counts for this T-subset per CCD
+            y = counts_raji[tsubset_cols].sum(axis=1).values
+
+            # Compute mean and variance
+            mu = np.mean(y)
+            sigma = np.std(y)
+
+            if sigma == 0:
+                continue
+
+            # Z-score for each CCD
+            z_scores = (y - mu) / sigma
+
+            # For NB-GLM style effects, compute log-ratio
+            log_ratio = np.log((y + 1) / (mu + 1))
+
+            tsubset_results[tsubset] = {
+                'y': y,
+                'z_scores': z_scores,
+                'log_ratio': log_ratio,
+                'mu': mu,
+                'sigma': sigma,
+            }
+
+        if len(tsubset_results) < 2:
+            print("  Not enough T-subsets")
+            return pd.DataFrame()
+
+        # Compute contrasts between T-subsets
+        contrast_results = []
+
+        for i, ccd in enumerate(all_ccds):
+            for ts1, ts2 in TSUBSET_CONTRASTS:
+                if ts1 not in tsubset_results or ts2 not in tsubset_results:
+                    continue
+
+                z1 = tsubset_results[ts1]['z_scores'][i]
+                z2 = tsubset_results[ts2]['z_scores'][i]
+
+                lr1 = tsubset_results[ts1]['log_ratio'][i]
+                lr2 = tsubset_results[ts2]['log_ratio'][i]
+
+                diff = z1 - z2
+                logFC = lr1 - lr2
+
+                # SE approximation (assume independent)
+                se = np.sqrt(2)  # z-scores have unit variance
+                z = diff / se
+                pval = 2 * stats.norm.sf(abs(z))
+
+                contrast_results.append({
+                    'CCD': ccd,
+                    'contrast': f"{ts1}_vs_{ts2}",
+                    f'{ts1}_zscore': z1,
+                    f'{ts2}_zscore': z2,
+                    'logFC': logFC,
+                    'diff': diff,
+                    'zscore': z,
+                    'pvalue': pval,
+                })
+
+        # PD1 contrast
+        pd1_results_dict = {}
+        for pd1 in ['High', 'Low']:
+            pd1_cols = [c for c in raji_cols if pd1 in c]
+            if not pd1_cols:
+                continue
+
+            y = counts_raji[pd1_cols].sum(axis=1).values
+            mu = np.mean(y)
+            sigma = np.std(y)
+
+            if sigma > 0:
+                z_scores = (y - mu) / sigma
+                log_ratio = np.log((y + 1) / (mu + 1))
+                pd1_results_dict[pd1] = {
+                    'z_scores': z_scores,
+                    'log_ratio': log_ratio,
+                }
+
+        if 'High' in pd1_results_dict and 'Low' in pd1_results_dict:
+            for i, ccd in enumerate(all_ccds):
+                z_low = pd1_results_dict['Low']['z_scores'][i]
+                z_high = pd1_results_dict['High']['z_scores'][i]
+
+                lr_low = pd1_results_dict['Low']['log_ratio'][i]
+                lr_high = pd1_results_dict['High']['log_ratio'][i]
+
+                diff = z_low - z_high
+                logFC = lr_low - lr_high
+
+                se = np.sqrt(2)
+                z = diff / se
+                pval = 2 * stats.norm.sf(abs(z))
+
+                contrast_results.append({
+                    'CCD': ccd,
+                    'contrast': 'PD1Low_vs_PD1High',
+                    'Low_zscore': z_low,
+                    'High_zscore': z_high,
+                    'logFC': logFC,
+                    'diff': diff,
+                    'zscore': z,
+                    'pvalue': pval,
+                })
+
+        if not contrast_results:
+            print("  No contrasts computed")
+            return pd.DataFrame()
+
+        results_df = pd.DataFrame(contrast_results)
+
+        # Apply FDR correction
+        results_df['qvalue'] = apply_fdr_correction(results_df, 'pvalue', 'contrast')
+
+        # Save results
+        results_df.to_csv(output_path / "ccd_nbglm_contrasts.csv", index=False)
+
+        # Save per-Tsubset z-scores
+        tsubset_zscores = []
+        for i, ccd in enumerate(all_ccds):
+            row = {'CCD': ccd}
+            for ts, data in tsubset_results.items():
+                row[f'{ts}_zscore'] = data['z_scores'][i]
+                row[f'{ts}_logFC'] = data['log_ratio'][i]
+            tsubset_zscores.append(row)
+        pd.DataFrame(tsubset_zscores).to_csv(output_path / "ccd_nbglm_tsubset_zscores.csv", index=False)
+
+        # Create plots
+        plots_path = output_path / 'plots'
+        plots_path.mkdir(exist_ok=True)
+
+        # Volcano plots for contrasts
+        create_ccd_contrast_volcano_plots(results_df, plots_path, "NB-GLM")
+
+        print(f"  Saved CCD-level NB-GLM results to {output_path}")
+        return results_df
+
+    except Exception as e:
+        print(f"  Error in CCD NB-GLM: {e}")
+        import traceback
+        traceback.print_exc()
+        return pd.DataFrame()
+
+
+def run_ccd_dm_analysis(counts_wide, cand, smeta, output_path):
+    """
+    Run Dirichlet-Multinomial analysis at CCD level.
+
+    For each CCD, tests whether its phenotype distribution differs from
+    the leave-one-out mean using G-test (log-likelihood ratio test).
+
+    This asks: "Does this specific construct shift the phenotype distribution?"
+
+    Statistical approach:
+    - Compare each CCD to the leave-one-out mean (excluding that CCD)
+    - Use G-test for goodness-of-fit
+    - Compute PIPs using empirical Bayes spike-and-slab (better for large N)
+    - Also provide BH-FDR q-values for reference
+    """
+    print("\n=== Running CCD-Level Dirichlet-Multinomial Analysis ===")
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Filter to Raji samples
+        raji_cols = [c for c in counts_wide.columns if 'CAR:Raji' in c]
+        counts_raji = counts_wide[raji_cols]
+
+        all_ccds = counts_raji.index.tolist()
+        n_ccds = len(all_ccds)
+        print(f"  Testing {n_ccds} CCDs")
+
+        # Build phenotype count matrix for each CCD
+        # Columns: phenotypes, Rows: CCDs
+        pheno_counts = {}
+        for pheno, pattern in RAJI_PHENOTYPE_PATTERNS.items():
+            pheno_cols = [c for c in raji_cols if pattern in c]
+            if pheno_cols:
+                pheno_counts[pheno] = counts_raji[pheno_cols].sum(axis=1)
+
+        pheno_df = pd.DataFrame(pheno_counts)
+        phenotypes = list(pheno_counts.keys())
+        n_phenotypes = len(phenotypes)
+
+        # Compute total counts per CCD
+        total_counts = pheno_df.sum(axis=1)
+
+        # Global totals for leave-one-out calculation
+        global_pheno_totals = pheno_df.sum(axis=0)
+        global_total = global_pheno_totals.sum()
+
+        print(f"  Phenotypes: {phenotypes}")
+        print(f"  Total counts: {global_total:,}")
+
+        # For each CCD, compute G-test comparing to leave-one-out expected
+        results = []
+
+        for ccd in all_ccds:
+            ccd_counts = pheno_df.loc[ccd].values
+            ccd_total = total_counts.loc[ccd]
+
+            if ccd_total < 10:
+                # Skip CCDs with very low counts
+                continue
+
+            # Leave-one-out expected proportions
+            loo_totals = global_pheno_totals - pheno_df.loc[ccd]
+            loo_total = global_total - ccd_total
+            loo_props = loo_totals / loo_total
+
+            # Expected counts under null (same proportions as rest)
+            expected_counts = loo_props.values * ccd_total
+
+            # G-test (log-likelihood ratio)
+            # G = 2 * sum(O * log(O/E))
+            # Handle zeros carefully
+            g_stat = 0.0
+            for obs, exp in zip(ccd_counts, expected_counts):
+                if obs > 0 and exp > 0:
+                    g_stat += 2 * obs * np.log(obs / exp)
+
+            # Degrees of freedom = n_phenotypes - 1
+            df = n_phenotypes - 1
+            # Use survival function for numerical stability (avoids 1 - 1.0 = 0 issue)
+            pval = stats.chi2.sf(g_stat, df)
+
+            # Effect size: compute log-odds for each phenotype vs LOO mean
+            # Also compute standard errors for PIP calculation
+            ccd_props = ccd_counts / ccd_total
+            effects = {}
+            effect_ses = {}
+            for j, pheno in enumerate(phenotypes):
+                p_ccd = np.clip(ccd_props[j], 1e-6, 1 - 1e-6)
+                p_loo = np.clip(loo_props.iloc[j], 1e-6, 1 - 1e-6)
+
+                # Log-odds difference
+                log_odds = np.log(p_ccd / (1 - p_ccd)) - np.log(p_loo / (1 - p_loo))
+                effects[pheno] = log_odds
+
+                # SE of log-odds difference (delta method)
+                # SE ≈ sqrt(1/(n*p*(1-p)) for CCD + 1/(n*p*(1-p)) for LOO)
+                # LOO term is negligible due to large n_loo
+                var_ccd = 1.0 / (ccd_total * p_ccd * (1 - p_ccd))
+                var_loo = 1.0 / (loo_total * p_loo * (1 - p_loo))
+                se = np.sqrt(var_ccd + var_loo)
+                effect_ses[pheno] = se
+
+            results.append({
+                'CCD': ccd,
+                'total_counts': int(ccd_total),
+                'g_statistic': g_stat,
+                'df': df,
+                'pvalue': pval,
+                **{f'{p}_prop': ccd_props[j] for j, p in enumerate(phenotypes)},
+                **{f'{p}_effect': effects[p] for p in phenotypes},
+                **{f'{p}_se': effect_ses[p] for p in phenotypes},
+            })
+
+        if not results:
+            print("  No CCDs with sufficient counts")
+            return pd.DataFrame()
+
+        results_df = pd.DataFrame(results)
+
+        # Apply GLOBAL BH-FDR (for reference)
+        results_df['qvalue'] = cs.bh_fdr(results_df['pvalue'])
+
+        # =========================================================
+        # Compute PIPs using empirical Bayes spike-and-slab
+        # This is more appropriate than p-values for large N data
+        # =========================================================
+        print("  Computing PIPs via empirical Bayes spike-and-slab...")
+
+        # Gather all effects and SEs for PIP calculation
+        effect_cols = [f'{p}_effect' for p in phenotypes]
+        se_cols = [f'{p}_se' for p in phenotypes]
+
+        all_effects = results_df[effect_cols].values.flatten()
+        all_ses = results_df[se_cols].values.flatten()
+
+        # Compute PIPs using the EB spike-and-slab
+        pips_flat, pi0_hat, tau2_hat = cs.eb_spike_slab_pip(all_effects, all_ses)
+
+        # Reshape back to (n_ccds, n_phenotypes)
+        pips_matrix = pips_flat.reshape(len(results_df), n_phenotypes)
+
+        # Add PIP columns
+        for j, pheno in enumerate(phenotypes):
+            results_df[f'{pheno}_pip'] = pips_matrix[:, j]
+
+        # Max PIP across phenotypes (overall "interestingness" of this CCD)
+        pip_cols = [f'{p}_pip' for p in phenotypes]
+        results_df['max_pip'] = results_df[pip_cols].max(axis=1)
+
+        # 90% CI excludes zero check for each phenotype
+        for pheno in phenotypes:
+            effect = results_df[f'{pheno}_effect']
+            se = results_df[f'{pheno}_se']
+            ci_lower = effect - 1.645 * se
+            ci_upper = effect + 1.645 * se
+            results_df[f'{pheno}_ci_excludes_zero'] = (ci_lower > 0) | (ci_upper < 0)
+
+        # PIP-based significance: PIP > 0.5 AND 90% CI excludes zero
+        for pheno in enumerate(phenotypes):
+            pass  # Individual phenotype significance computed above
+
+        # Overall PIP significance: max_pip > 0.5
+        results_df['significant_pip'] = results_df['max_pip'] > 0.5
+
+        print(f"  EB estimates: pi0={pi0_hat:.3f}, tau2={tau2_hat:.4f}")
+        n_sig_q = (results_df['qvalue'] < 0.10).sum()
+        n_sig_pip = results_df['significant_pip'].sum()
+        n_nominal = (results_df['pvalue'] < 0.05).sum()
+        print(f"  G-test results: {len(results_df)} CCDs tested")
+        print(f"    - Nominal p<0.05: {n_nominal}")
+        print(f"    - BH q<0.10: {n_sig_q}")
+        print(f"    - PIP > 0.5: {n_sig_pip}")
+
+        # Compute T-subset contrasts for all CCDs
+        # Using the log-odds effects computed above
+        contrast_results = []
+
+        for _, row in results_df.iterrows():
+            ccd = row['CCD']
+
+            for ts1, ts2 in TSUBSET_CONTRASTS:
+                # Average effects for each T-subset (over High/Low)
+                ts1_effects = [row[f'{p}_effect'] for p in phenotypes if p.startswith(ts1)]
+                ts2_effects = [row[f'{p}_effect'] for p in phenotypes if p.startswith(ts2)]
+                ts1_pips = [row[f'{p}_pip'] for p in phenotypes if p.startswith(ts1)]
+                ts2_pips = [row[f'{p}_pip'] for p in phenotypes if p.startswith(ts2)]
+
+                if not ts1_effects or not ts2_effects:
+                    continue
+
+                effect1 = np.mean(ts1_effects)
+                effect2 = np.mean(ts2_effects)
+                diff = effect1 - effect2
+                # Max PIP from the phenotypes involved in this contrast
+                contrast_max_pip = max(ts1_pips + ts2_pips)
+
+                contrast_results.append({
+                    'CCD': ccd,
+                    'contrast': f"{ts1}_vs_{ts2}",
+                    'effect': diff,
+                    f'{ts1}_effect': effect1,
+                    f'{ts2}_effect': effect2,
+                    'overall_pvalue': row['pvalue'],
+                    'overall_qvalue': row['qvalue'],
+                    'max_pip': row['max_pip'],
+                    'contrast_max_pip': contrast_max_pip,
+                })
+
+            # PD1 contrast
+            high_effects = [row[f'{p}_effect'] for p in phenotypes if 'High' in p]
+            low_effects = [row[f'{p}_effect'] for p in phenotypes if 'Low' in p]
+            high_pips = [row[f'{p}_pip'] for p in phenotypes if 'High' in p]
+            low_pips = [row[f'{p}_pip'] for p in phenotypes if 'Low' in p]
+
+            if high_effects and low_effects:
+                effect_high = np.mean(high_effects)
+                effect_low = np.mean(low_effects)
+                diff = effect_low - effect_high
+                contrast_max_pip = max(high_pips + low_pips)
+
+                contrast_results.append({
+                    'CCD': ccd,
+                    'contrast': 'PD1Low_vs_PD1High',
+                    'effect': diff,
+                    'Low_effect': effect_low,
+                    'High_effect': effect_high,
+                    'overall_pvalue': row['pvalue'],
+                    'overall_qvalue': row['qvalue'],
+                    'max_pip': row['max_pip'],
+                    'contrast_max_pip': contrast_max_pip,
+                })
+
+        contrast_df = pd.DataFrame(contrast_results)
+
+        # Save results
+        results_df.to_csv(output_path / "ccd_dm_gtest_results.csv", index=False)
+        contrast_df.to_csv(output_path / "ccd_dm_contrasts.csv", index=False)
+
+        # Create plots
+        plots_path = output_path / 'plots'
+        plots_path.mkdir(exist_ok=True)
+
+        # Create heatmap of effects for top CCDs
+        create_ccd_dm_heatmap(results_df, phenotypes, plots_path, output_path)
+
+        # Create volcano-style plot (effect vs -log10 q)
+        create_ccd_dm_volcano(results_df, contrast_df, plots_path)
+
+        # Create composite figure
+        create_ccd_dm_composite(plots_path)
+
+        print(f"  Saved CCD-level DM results to {output_path}")
+        return results_df
+
+    except Exception as e:
+        print(f"  Error in CCD DM: {e}")
+        import traceback
+        traceback.print_exc()
+        return pd.DataFrame()
+
+
+def create_ccd_dm_heatmap(results_df, phenotypes, plots_path, output_path):
+    """Create heatmap of log-odds effects for top CCDs (sorted by PIP)."""
+    if len(results_df) == 0:
+        return
+
+    # Sort by max_pip (descending) and take top 50 (or all if fewer)
+    df_sorted = results_df.sort_values('max_pip', ascending=False).head(50)
+
+    # Build effect matrix
+    effect_cols = [f'{p}_effect' for p in phenotypes]
+    effect_data = df_sorted[effect_cols].copy()
+    effect_data.index = df_sorted['CCD']
+    effect_data.columns = phenotypes
+
+    # Sort by max absolute effect
+    effect_data = effect_data.loc[effect_data.abs().max(axis=1).sort_values(ascending=False).index]
+
+    # Create heatmap
+    n_rows, n_cols = effect_data.shape
+    figsize = (max(6, n_cols * 0.8 + 2), max(8, n_rows * 0.25 + 1))
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    abs_max = np.nanmax(np.abs(effect_data.values))
+    if abs_max == 0:
+        abs_max = 1
+
+    im = ax.imshow(
+        effect_data.values,
+        aspect='auto',
+        cmap='RdBu_r',
+        vmin=-abs_max,
+        vmax=abs_max,
+        interpolation='nearest',
+    )
+
+    ax.set_xticks(range(len(phenotypes)))
+    ax.set_xticklabels(phenotypes, rotation=45, ha='right', fontsize=9)
+    ax.set_yticks(range(len(effect_data)))
+    ax.set_yticklabels(effect_data.index, fontsize=7)
+
+    ax.set_xlabel('Phenotype')
+    ax.set_ylabel('CCD')
+    ax.set_title('CCD Log-Odds Effects (Top by PIP)')
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.set_label('Log-odds effect')
+
+    fig.tight_layout()
+    fig.savefig(plots_path / "heatmap_pooled.png", dpi=300, bbox_inches='tight')
+    plt.close(fig)
+
+    effect_data.to_csv(output_path / "ccd_dm_effects_heatmap.csv")
+    print(f"    Created CCD DM heatmap")
+
+
+def create_ccd_dm_volcano(results_df, contrast_df, plots_path):
+    """Create volcano plots for CCD DM results using -log10(q) on y-axis.
+
+    Creates one overall volcano (dominant effect across contrasts) plus
+    four contrast-specific volcanos (EM vs CM, Naive vs CM, Naive vs EM,
+    PD1-Low vs PD1-High).
+
+    Visualization features:
+    - Y-axis: -log10(q-value) with 8% headroom above max for labels
+    - X-axis: log-odds effect bounded to [-3.0, +3.0]
+    - Effect threshold lines at |effect| = 0.5
+    - Points colored: red (positive significant), blue (negative significant),
+      grey (non-significant or |effect| < 0.5)
+
+    Labeling strategy:
+    - Priority CCDs (4-1BB, CD28, OX40, etc.) labeled first regardless of effect size
+    - Other interesting T/NK CCDs labeled if they pass effect threshold
+    - Top CCDs by effect size labeled as fallback
+    - Display aliases convert systematic names to common gene names
+      (e.g., TNFRSF9-1 -> 4-1BB-1, CD25 -> IL2RA)
+    - adjustText library provides label repulsion (optional dependency)
+
+    Parameters
+    ----------
+    results_df : pd.DataFrame
+        CCD-level results with qvalue and effect columns
+    contrast_df : pd.DataFrame
+        Contrast-specific results with effect and overall_qvalue columns
+    plots_path : Path
+        Output directory for volcano plot PNGs
+    """
+    # Try to import adjustText for label repulsion (optional)
+    try:
+        from adjustText import adjust_text
+        HAS_ADJUSTTEXT = True
+    except ImportError:
+        HAS_ADJUSTTEXT = False
+        print("    Note: Install 'adjustText' for better label placement: pip install adjustText")
+
+    if len(results_df) == 0:
+        return
+
+    q_thresh = 0.10      # q-value threshold for significance
+    effect_thresh = 0.5  # Effect threshold for coloring
+    x_bound = 3.0        # X-axis bounds (symmetric)
+
+    # Canonical costimulatory domains and their aliases (including CD numbers)
+    INTERESTING_CCDS = [
+        # Classic T-cell costimulatory receptors
+        'CD28',
+        'CD137', '4-1BB', 'TNFRSF9',  # 4-1BB aliases
+        'CD134', 'OX40', 'TNFRSF4',   # OX40 aliases
+        'ICOS', 'CD278',              # ICOS aliases
+        'CD27', 'TNFRSF7',
+        'HVEM', 'TNFRSF14', 'CD270',
+        'CD30', 'TNFRSF8',
+        'GITR', 'TNFRSF18', 'CD357',
+        'CD40', 'TNFRSF5',
+
+        # NK cell receptors
+        'CD16', 'FCGR3', 'FCGR3A', 'FCGR3B',
+        'NKG2D', 'KLRK1', 'CD314',
+        'CD244', '2B4', 'SLAMF4',
+        'DNAM', 'CD226',
+        'NKp30', 'NCR3', 'CD337',
+        'NKp44', 'NCR2', 'CD336',
+        'NKp46', 'NCR1', 'CD335',
+
+        # Signaling adapters
+        'DAP10', 'HCST',
+        'DAP12', 'TYROBP',
+        'CD3', 'CD3Z', 'CD247',
+        'CD8', 'CD8A', 'CD8B',
+        'LCK', 'ZAP70', 'FYN',
+
+        # SLAM family
+        'SLAM', 'CD150', 'SLAMF1',
+        'CD48', 'SLAMF2',
+        'CD84', 'SLAMF5',
+        'SLAMF6', 'CD352',
+        'SLAMF7', 'CD319', 'CRACC',
+
+        # Inhibitory receptors (checkpoint)
+        'BTLA', 'CD272',
+        'PD1', 'PDCD1', 'CD279',
+        'CTLA4', 'CD152',
+        'LAG3', 'CD223',
+        'TIM3', 'HAVCR2', 'CD366',
+        'TIGIT',
+
+        # Interleukin receptors with CD numbers
+        'IL1R', 'IL1RN', 'IL1RA',
+        'IL2RA', 'CD25',
+        'IL2RB', 'CD122',
+        'IL2RG', 'CD132',  # Common gamma chain
+        'IL4R', 'CD124',
+        'IL6R', 'CD126',
+        'IL7R', 'IL7RA', 'CD127',
+        'IL10RA', 'CD210', 'CD210A',
+        'IL12RB1', 'CD212',
+        'IL15RA', 'CD215',
+        'IL18R1', 'CD218', 'CD218A',
+        'IL21R',
+        'IL23R',
+    ]
+
+    # TLR pattern (handled separately via regex)
+    TLR_PATTERN = re.compile(r'TLR\d*', re.IGNORECASE)
+
+    # Preferred display aliases: map CD numbers and systematic names to common gene names
+    # Format: pattern -> preferred display name (gene name preferred over CD number)
+    DISPLAY_ALIASES = {
+        # Key costimulatory receptors
+        'TNFRSF9': '4-1BB', 'CD137': '4-1BB',
+        'TNFRSF4': 'OX40', 'CD134': 'OX40',
+        'CD278': 'ICOS',
+        'TNFRSF7': 'CD27',
+        'TNFRSF14': 'HVEM', 'CD270': 'HVEM',
+        'TNFRSF8': 'CD30',
+        'TNFRSF18': 'GITR', 'CD357': 'GITR',
+        'TNFRSF5': 'CD40',
+        # NK receptors
+        'FCGR3A': 'CD16', 'FCGR3B': 'CD16', 'FCGR3': 'CD16',
+        'KLRK1': 'NKG2D', 'CD314': 'NKG2D',
+        'SLAMF4': '2B4', 'CD244': '2B4',
+        'CD226': 'DNAM-1',
+        'NCR3': 'NKp30', 'CD337': 'NKp30',
+        'NCR2': 'NKp44', 'CD336': 'NKp44',
+        'NCR1': 'NKp46', 'CD335': 'NKp46',
+        # Signaling
+        'HCST': 'DAP10',
+        'TYROBP': 'DAP12',
+        'CD247': 'CD3z',
+        # SLAM family
+        'SLAMF1': 'SLAM', 'CD150': 'SLAM',
+        'SLAMF2': 'CD48',
+        'SLAMF5': 'CD84',
+        'CD352': 'SLAMF6',
+        'CD319': 'SLAMF7', 'CRACC': 'SLAMF7',
+        # Checkpoints
+        'CD272': 'BTLA',
+        'PDCD1': 'PD-1', 'CD279': 'PD-1',
+        'CD152': 'CTLA-4',
+        'CD223': 'LAG-3',
+        'HAVCR2': 'TIM-3', 'CD366': 'TIM-3',
+        # Interleukin receptors - prefer gene name over CD number
+        'CD25': 'IL2RA',
+        'CD122': 'IL2RB',
+        'CD132': 'IL2RG',
+        'CD124': 'IL4R',
+        'CD126': 'IL6R',
+        'CD127': 'IL7RA',
+        'CD210': 'IL10RA', 'CD210A': 'IL10RA',
+        'CD212': 'IL12RB1',
+        'CD215': 'IL15RA',
+        'CD218': 'IL18R1', 'CD218A': 'IL18R1',
+    }
+
+    # Priority CCDs that should ALWAYS be labeled if they pass thresholds
+    PRIORITY_CCDS = ['TNFRSF9', '4-1BB', 'CD28', 'ICOS', 'CD27', 'OX40', 'CD40', 'GITR']
+
+    def is_interesting(ccd_name):
+        """Check if CCD matches any interesting pattern."""
+        ccd_upper = str(ccd_name).upper()
+        # Check standard patterns
+        if any(pattern.upper() in ccd_upper for pattern in INTERESTING_CCDS):
+            return True
+        # Check TLR pattern (TLR1, TLR2, ..., TLR10, etc.)
+        if TLR_PATTERN.search(ccd_upper):
+            return True
+        return False
+
+    def is_priority(ccd_name):
+        """Check if CCD is a priority domain that should always be labeled."""
+        ccd_upper = str(ccd_name).upper()
+        return any(p.upper() in ccd_upper for p in PRIORITY_CCDS)
+
+    def get_display_name(ccd_name):
+        """Get preferred display name for a CCD (gene name over CD number)."""
+        ccd_str = str(ccd_name)
+        # Strip suffixes like "-1", "-2" for matching
+        base_name = re.sub(r'-\d+$', '', ccd_str)
+        base_upper = base_name.upper()
+
+        # Check direct alias match
+        for pattern, alias in DISPLAY_ALIASES.items():
+            if pattern.upper() == base_upper or pattern.upper() in base_upper:
+                # Keep any suffix from original name
+                suffix = ccd_str[len(base_name):] if len(ccd_str) > len(base_name) else ''
+                return alias + suffix
+
+        return ccd_str  # Return original if no alias found
+
+    # Overall volcano (signed dominant effect vs -log10 q)
+    fig, ax = plt.subplots(figsize=(10, 7))
+
+    # Compute max absolute effect per CCD and get the signed value
+    effect_cols = [c for c in results_df.columns if c.endswith('_effect') and not c.endswith('_se')]
+    effect_data = results_df[effect_cols]
+
+    # Get the signed effect with maximum absolute value
+    def get_dominant_effect(row):
+        idx = row.abs().argmax()
+        return row.iloc[idx]
+
+    dominant_effect_raw = effect_data.apply(get_dominant_effect, axis=1)
+    dominant_effect = dominant_effect_raw.clip(lower=-x_bound, upper=x_bound)
+
+    # Use -log10(q) on y-axis (no cutoff)
+    neglog10_q = -np.log10(results_df['qvalue'].clip(lower=1e-308))
+
+    # Color: grey if |effect| < threshold, else red/blue by direction (for significant)
+    colors = []
+    for i, (_, row) in enumerate(results_df.iterrows()):
+        if abs(dominant_effect_raw.iloc[i]) < effect_thresh:
+            colors.append("#7f7f7f")  # Grey for small effects
+        elif row['qvalue'] >= q_thresh:
+            colors.append("#7f7f7f")  # Grey for non-significant
+        elif dominant_effect_raw.iloc[i] > 0:
+            colors.append("#d62728")  # Red for positive
+        else:
+            colors.append("#1f77b4")  # Blue for negative
+
+    ax.scatter(dominant_effect, neglog10_q, c=colors, s=20, alpha=0.6)
+
+    # Reference lines
+    ax.axhline(-np.log10(q_thresh), color='red', linestyle='--', linewidth=1, alpha=0.7,
+               label=f'q = {q_thresh}')
+    ax.axvline(effect_thresh, color='green', linestyle='--', linewidth=1, alpha=0.5)
+    ax.axvline(-effect_thresh, color='green', linestyle='--', linewidth=1, alpha=0.5,
+               label=f'|effect| = {effect_thresh}')
+    ax.axvline(0, color='gray', linestyle='-', linewidth=0.5, alpha=0.5)
+
+    # Collect labels for adjustText
+    texts = []
+    labeled = set()  # Track original CCD names (for deduplication)
+    y_max = neglog10_q.max()
+
+    # First pass: label PRIORITY CCDs (critical domains like 4-1BB) that pass significance
+    for i, (idx, row) in enumerate(results_df.iterrows()):
+        ccd = str(row['CCD'])
+        if row['qvalue'] < q_thresh and is_priority(ccd) and ccd not in labeled:
+            display_name = get_display_name(ccd)
+            texts.append(ax.text(dominant_effect.iloc[i], neglog10_q.iloc[i], display_name, fontsize=7))
+            labeled.add(ccd)
+            print(f"      Priority labeled: {ccd} -> {display_name}")
+
+    # Second pass: label other interesting CCDs that pass thresholds
+    for i, (idx, row) in enumerate(results_df.iterrows()):
+        ccd = str(row['CCD'])
+        if row['qvalue'] < q_thresh and abs(dominant_effect_raw.iloc[i]) >= effect_thresh:
+            if is_interesting(ccd) and ccd not in labeled:
+                display_name = get_display_name(ccd)
+                texts.append(ax.text(dominant_effect.iloc[i], neglog10_q.iloc[i], display_name, fontsize=7))
+                labeled.add(ccd)
+                if len(labeled) >= 20:
+                    break
+
+    # Third pass: label top CCDs by effect size if not already labeled
+    top_effect_idx = dominant_effect_raw.abs().nlargest(10).index
+    for idx in top_effect_idx:
+        i = results_df.index.get_loc(idx)
+        row = results_df.loc[idx]
+        ccd = str(row['CCD'])
+        if ccd not in labeled and row['qvalue'] < q_thresh:
+            display_name = get_display_name(ccd)
+            texts.append(ax.text(dominant_effect.iloc[i], neglog10_q.iloc[i], display_name, fontsize=7))
+            labeled.add(ccd)
+            if len(labeled) >= 25:
+                break
+
+    # Apply label repulsion if available
+    if texts and HAS_ADJUSTTEXT:
+        # Configure to prefer labels below points (especially helpful at saturation)
+        adjust_text(texts, ax=ax,
+                    arrowprops=dict(arrowstyle='->', color='gray', lw=0.5),
+                    expand_points=(1.5, 1.5),
+                    force_text=(0.5, 1.0),  # More vertical force to spread labels
+                    force_points=(0.5, 0.5))
+
+    print(f"    Labeled {len(labeled)} CCDs in overall volcano")
+
+    ax.set_xlim(-x_bound * 1.05, x_bound * 1.05)
+    # Extend Y-axis slightly above max to give room for labels at saturation
+    ax.set_ylim(bottom=0, top=y_max * 1.08)
+    ax.set_xlabel('Dominant Log-odds Effect')
+    ax.set_ylabel(r'$-\log_{10}$ q-value')
+    ax.set_title('CCD-level Compositional Effects (G-test)')
+    ax.legend(loc='upper right', fontsize=8)
+
+    fig.tight_layout()
+    fig.savefig(plots_path / "volcano_gtest_overall.png", dpi=200)
+    plt.close(fig)
+
+    # Contrast-specific volcanos (4 plots: EM vs CM, Naive vs CM, Naive vs EM, PD1Low vs PD1High)
+    if len(contrast_df) == 0:
+        print("    Warning: No contrast data for volcano plots")
+        return
+
+    for contrast_name in contrast_df['contrast'].unique():
+        df = contrast_df[contrast_df['contrast'] == contrast_name].copy()
+        if len(df) == 0:
+            continue
+
+        fig, ax = plt.subplots(figsize=(10, 7))
+
+        # Clip effect for display (symmetric bounds)
+        effect_raw = df['effect'].values
+        effect_clipped = np.clip(effect_raw, -x_bound, x_bound)
+
+        # Use -log10(q) on y-axis (no cutoff)
+        neglog10_q = -np.log10(df['overall_qvalue'].clip(lower=1e-308))
+
+        # Color: grey if |effect| < threshold or non-significant, else red/blue by direction
+        colors = []
+        for i, (_, row) in enumerate(df.iterrows()):
+            if abs(effect_raw[i]) < effect_thresh:
+                colors.append("#7f7f7f")  # Grey for small effects
+            elif row['overall_qvalue'] >= q_thresh:
+                colors.append("#7f7f7f")  # Grey for non-significant
+            elif effect_raw[i] > 0:
+                colors.append("#d62728")  # Red for positive
+            else:
+                colors.append("#1f77b4")  # Blue for negative
+
+        ax.scatter(effect_clipped, neglog10_q, c=colors, s=20, alpha=0.6)
+
+        # Reference lines
+        ax.axhline(-np.log10(q_thresh), color='red', linestyle='--', linewidth=1, alpha=0.7)
+        ax.axvline(0, color='gray', linestyle='-', linewidth=0.5, alpha=0.5)
+        ax.axvline(effect_thresh, color='green', linestyle='--', linewidth=1, alpha=0.5)
+        ax.axvline(-effect_thresh, color='green', linestyle='--', linewidth=1, alpha=0.5)
+
+        # Collect labels for adjustText
+        texts = []
+        labeled = set()
+        y_max = neglog10_q.max()
+
+        # First pass: label PRIORITY CCDs that pass significance
+        for i, (_, row) in enumerate(df.iterrows()):
+            ccd = str(row['CCD'])
+            if row['overall_qvalue'] < q_thresh and is_priority(ccd) and ccd not in labeled:
+                display_name = get_display_name(ccd)
+                texts.append(ax.text(effect_clipped[i], neglog10_q.iloc[i], display_name, fontsize=7))
+                labeled.add(ccd)
+
+        # Second pass: label other interesting CCDs that pass thresholds
+        for i, (_, row) in enumerate(df.iterrows()):
+            ccd = str(row['CCD'])
+            if row['overall_qvalue'] < q_thresh and abs(effect_raw[i]) >= effect_thresh:
+                if is_interesting(ccd) and ccd not in labeled:
+                    display_name = get_display_name(ccd)
+                    texts.append(ax.text(effect_clipped[i], neglog10_q.iloc[i], display_name, fontsize=7))
+                    labeled.add(ccd)
+                    if len(labeled) >= 15:
+                        break
+
+        # Third pass: label top CCDs by effect size if not already labeled
+        effect_abs = np.abs(effect_raw)
+        top_effect_indices = np.argsort(effect_abs)[::-1][:10]
+        for i in top_effect_indices:
+            row = df.iloc[i]
+            ccd = str(row['CCD'])
+            if ccd not in labeled and row['overall_qvalue'] < q_thresh:
+                display_name = get_display_name(ccd)
+                texts.append(ax.text(effect_clipped[i], neglog10_q.iloc[i], display_name, fontsize=7))
+                labeled.add(ccd)
+                if len(labeled) >= 20:
+                    break
+
+        # Apply label repulsion if available
+        if texts and HAS_ADJUSTTEXT:
+            adjust_text(texts, ax=ax,
+                        arrowprops=dict(arrowstyle='->', color='gray', lw=0.5),
+                        expand_points=(1.5, 1.5),
+                        force_text=(0.5, 1.0),
+                        force_points=(0.5, 0.5))
+
+        ax.set_xlim(-x_bound * 1.05, x_bound * 1.05)
+        # Extend Y-axis slightly above max to give room for labels at saturation
+        ax.set_ylim(bottom=0, top=y_max * 1.08)
+        ax.set_xlabel('Log-odds Effect Difference')
+        ax.set_ylabel(r'$-\log_{10}$ q-value')
+
+        if '_vs_' in contrast_name:
+            parts = contrast_name.split('_vs_')
+            title = f"{parts[0]} vs {parts[1]}"
+        else:
+            title = contrast_name.replace('_', ' ')
+        ax.set_title(f'CCD-level DM: {title}')
+
+        fig.tight_layout()
+        if 'PD1' in contrast_name:
+            fig.savefig(plots_path / f"volcano_{contrast_name}_pooledTsubset.png", dpi=200)
+        else:
+            parts = contrast_name.split('_vs_')
+            fig.savefig(plots_path / f"volcano_{parts[0]}_vs_{parts[1]}_pooledPD1.png", dpi=200)
+        plt.close(fig)
+        print(f"    Created CCD DM volcano: {title}")
+
+
+def create_ccd_dm_composite(plots_path):
+    """Create composite figure with heatmap and volcanos."""
+    try:
+        # Use the existing assembly function if volcano plots exist
+        cs.assemble_dm_main_figure(
+            plots_path,
+            out_png="figure_ccd_dm_composite.png",
+            out_pdf=None,
+        )
+        print(f"    Created CCD DM composite figure")
+    except Exception as e:
+        print(f"    Warning: CCD DM composite figure failed: {e}")
+
+
+def create_ccd_volcano_plots(contrast_df, pd1_df, plots_path, method_name):
+    """Create volcano plots for CCD-level MW results."""
+    q_thresh = 0.10
+    effect_thresh = 0.10
+
+    # T-subset contrast volcanos
+    if len(contrast_df) > 0:
+        for contrast_name in contrast_df['contrast'].unique():
+            df = contrast_df[contrast_df['contrast'] == contrast_name].copy()
+            if len(df) == 0:
+                continue
+
+            df['neglog10_q'] = -np.log10(df['qvalue'].clip(lower=1e-300))
+
+            fig, ax = plt.subplots(figsize=(8, 6))
+            colors = np.where(df['diff'] >= 0, "#3182bd", "#e34a33")
+            ax.scatter(df['diff'], df['neglog10_q'], c=colors, s=8, alpha=0.5)
+
+            ax.axhline(-np.log10(q_thresh), color='gray', linestyle='--', linewidth=0.8)
+            ax.axvline(+effect_thresh, color='gray', linestyle='--', linewidth=0.8)
+            ax.axvline(-effect_thresh, color='gray', linestyle='--', linewidth=0.8)
+
+            # Label top significant
+            sig_df = df[df['qvalue'] < q_thresh].nsmallest(5, 'qvalue')
+            for _, row in sig_df.iterrows():
+                ax.text(row['diff'], row['neglog10_q'], row['CCD'], fontsize=6)
+
+            ax.set_xlabel("Effect Difference")
+            ax.set_ylabel(r"$-\log_{10}$ q-value")
+            parts = contrast_name.split('_vs_')
+            ax.set_title(f"CCD-level {method_name}: {parts[0]} vs {parts[1]}")
+
+            plt.tight_layout()
+            fig.savefig(plots_path / f"ccd_volcano_{parts[0]}_vs_{parts[1]}_pooledPD1.png", dpi=200)
+            plt.close(fig)
+
+    # PD1 volcano
+    if len(pd1_df) > 0:
+        pd1_df = pd1_df.copy()
+        pd1_df['neglog10_q'] = -np.log10(pd1_df['qvalue'].clip(lower=1e-300))
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        colors = np.where(pd1_df['diff'] >= 0, "#3182bd", "#e34a33")
+        ax.scatter(pd1_df['diff'], pd1_df['neglog10_q'], c=colors, s=8, alpha=0.5)
+
+        ax.axhline(-np.log10(q_thresh), color='gray', linestyle='--', linewidth=0.8)
+        ax.axvline(+effect_thresh, color='gray', linestyle='--', linewidth=0.8)
+        ax.axvline(-effect_thresh, color='gray', linestyle='--', linewidth=0.8)
+
+        sig_df = pd1_df[pd1_df['qvalue'] < q_thresh].nsmallest(5, 'qvalue')
+        for _, row in sig_df.iterrows():
+            ax.text(row['diff'], row['neglog10_q'], row['CCD'], fontsize=6)
+
+        ax.set_xlabel("Effect Difference")
+        ax.set_ylabel(r"$-\log_{10}$ q-value")
+        ax.set_title(f"CCD-level {method_name}: PD1-Low vs PD1-High")
+
+        plt.tight_layout()
+        fig.savefig(plots_path / "ccd_volcano_PD1Low_vs_PD1High_pooledTsubset.png", dpi=200)
+        plt.close(fig)
+
+
+def create_ccd_contrast_volcano_plots(results_df, plots_path, method_name):
+    """Create volcano plots for CCD-level NB-GLM/DM contrasts."""
+    if len(results_df) == 0:
+        return
+
+    q_thresh = 0.10
+    lfc_thresh = 0.10
+
+    for contrast_name in results_df['contrast'].unique():
+        df = results_df[results_df['contrast'] == contrast_name].copy()
+        if len(df) == 0:
+            continue
+
+        # Use logFC if available, else use 'effect' or 'diff'
+        effect_col = 'logFC' if 'logFC' in df.columns else ('effect' if 'effect' in df.columns else 'diff')
+
+        df['neglog10_q'] = -np.log10(df['qvalue'].clip(lower=1e-300))
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        colors = np.where(df[effect_col] >= 0, "#3182bd", "#e34a33")
+        ax.scatter(df[effect_col], df['neglog10_q'], c=colors, s=8, alpha=0.5)
+
+        ax.axhline(-np.log10(q_thresh), color='gray', linestyle='--', linewidth=0.8)
+        ax.axvline(+lfc_thresh, color='gray', linestyle='--', linewidth=0.8)
+        ax.axvline(-lfc_thresh, color='gray', linestyle='--', linewidth=0.8)
+
+        # Label top significant
+        sig_df = df[df['qvalue'] < q_thresh].nsmallest(5, 'qvalue')
+        for _, row in sig_df.iterrows():
+            ax.text(row[effect_col], row['neglog10_q'], row['CCD'], fontsize=6)
+
+        ax.set_xlabel(r"$\log_2$ fold change" if effect_col == 'logFC' else "Effect")
+        ax.set_ylabel(r"$-\log_{10}$ q-value")
+
+        if '_vs_' in contrast_name:
+            parts = contrast_name.split('_vs_')
+            title = f"{parts[0]} vs {parts[1]}"
+            fname_parts = parts
+        else:
+            title = contrast_name.replace('_', ' ')
+            fname_parts = None
+
+        ax.set_title(f"CCD-level {method_name}: {title}")
+
+        plt.tight_layout()
+
+        if fname_parts and 'PD1' not in contrast_name:
+            fig.savefig(plots_path / f"ccd_volcano_{fname_parts[0]}_vs_{fname_parts[1]}_pooledPD1.png", dpi=200)
+        elif 'PD1' in contrast_name:
+            fig.savefig(plots_path / f"ccd_volcano_{contrast_name}_pooledTsubset.png", dpi=200)
+        else:
+            fig.savefig(plots_path / f"ccd_volcano_{contrast_name}.png", dpi=200)
+
+        plt.close(fig)
+        print(f"    Created CCD volcano: {title}")
+
+
+def run_ccd_analyses(counts_raji, counts_wide, cand, smeta, output_base):
+    """Run CCD-level Dirichlet-Multinomial analysis.
+
+    Only runs DM analysis at CCD level. MW and NB-GLM are skipped because:
+    - DM properly tests compositional differences (appropriate for phenotype proportions)
+    - MW/NB-GLM showed no power at CCD level while DM found signal
+    - Reduces multiple testing burden and computational cost
+    """
+    print(f"\n{'='*60}")
+    print("RUNNING CCD-LEVEL ANALYSIS (DM only)")
+    print(f"{'='*60}")
+
+    import gc
+
+    ccd_results = {}
+
+    # CCD-level DM (G-test with leave-one-out comparison)
+    ccd_results['ccd_dm'] = run_ccd_dm_analysis(
+        counts_wide, cand, smeta,
+        output_base / 'ccd_analysis' / 'dm_analysis'
+    )
+    plt.close('all'); gc.collect()
+
+    # Print summary
+    print(f"\n{'='*60}")
+    print("CCD-LEVEL SIGNIFICANCE SUMMARY")
+    print(f"(q<0.10 BH-FDR)")
+    print(f"{'='*60}")
+
+    n_total, n_sig = count_significant_results(ccd_results['ccd_dm'])
+    print(f"CCD DM (G-test): {n_sig} / {n_total} significant")
+
+    print(f"{'='*60}\n")
+
+    return ccd_results
+
+
+# =============================================================================
 # Summary
 # =============================================================================
 
@@ -1978,7 +3322,21 @@ def create_summary_excel(results_dict, output_path):
 # =============================================================================
 
 def run_all_analyses(subset_type: str):
-    """Run all 5 analysis methods for a given subset."""
+    """Run all analysis methods for a given CCD subset.
+
+    Executes 4 ELM-level discovery methods plus CCD-level validation:
+    1. Mann-Whitney (mw): Pearson residuals + rank-based comparison
+    2. Joint NB-GLM: Single model with phenotype interactions
+    3. Phenotype NB-GLM: Pooled T-subset models
+    4. Dirichlet-Multinomial (dm): Compositional model with PIP
+    5. CCD-level DM: G-test with leave-one-out comparison
+
+    Parameters
+    ----------
+    subset_type : str
+        One of: 'non_gpcr', 'gpcr', 'gpcr_1', 'gpcr_2', 'gpcr_3_4',
+        'non_gpcr_1', 'non_gpcr_2', 'non_gpcr_3', 'non_gpcr_4'
+    """
     print(f"\n{'='*60}")
     print(f"RUNNING ANALYSES FOR: {subset_type.upper()}")
     print(f"{'='*60}")
@@ -2029,6 +3387,14 @@ def run_all_analyses(subset_type: str):
     )
     plt.close('all'); gc.collect()
 
+    # 5. CCD-level analyses (individual constructs)
+    ccd_results = run_ccd_analyses(
+        counts_raji, counts_wide, cand, smeta,
+        output_base
+    )
+    results.update(ccd_results)
+    plt.close('all'); gc.collect()
+
     # Create summary
     create_summary_excel(results, output_base)
 
@@ -2042,7 +3408,12 @@ def run_all_analyses(subset_type: str):
 
 
 def main():
-    """Main entry point."""
+    """Run comprehensive analysis across all CCD subsets.
+
+    Iterates through 9 subset combinations (non-GPCR and GPCR,
+    with and without ICD conditioning) and runs all 5 analysis
+    methods on each. Results are saved to results/{subset}/.
+    """
     print("="*60)
     print("COMPREHENSIVE CAR-T COSTIM SCREEN ANALYSIS")
     print("="*60)
@@ -2055,17 +3426,17 @@ def main():
     subsets = [
         # Non-GPCR: any ICD ID
         'non_gpcr',
-        # Non-GPCR conditioned on ICD ID
+        # Non-GPCR conditioned on ICD ID (separate 3 and 4 - category too heterogeneous)
         'non_gpcr_1',
         'non_gpcr_2',
-        'non_gpcr_3_4',  # Combined ICD ID 3 and 4 (too few CCDs separately)
+        'non_gpcr_3',
+        'non_gpcr_4',
         # GPCR: any ICD ID
         'gpcr',
-        # GPCR conditioned on ICD ID
+        # GPCR conditioned on ICD ID (combine 3+4: both are signaling domains)
         'gpcr_1',
         'gpcr_2',
-        'gpcr_3',
-        'gpcr_4',
+        'gpcr_3_4',  # Combined ICD ID 3 and 4 (both signaling domains in GPCR)
     ]
 
     import gc
