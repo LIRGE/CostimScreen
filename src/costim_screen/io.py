@@ -70,7 +70,7 @@ def load_candidate_metadata(
         - ELMCategory: semicolon-separated ELM motif categories
         - ICD Num: intracellular domain number
         - Num ICD: number of intracellular domains
-        - is_gpcr: 1 if Num ICD > 4, else 0
+        - is_gpcr: 1 if Num ICD == 4 (7-pass transmembrane/GPCR), else 0
 
     Raises
     ------
@@ -104,7 +104,8 @@ def load_candidate_metadata(
 
     cand["Num ICD"] = pd.to_numeric(cand["Num ICD"], errors="coerce")
     cand["ICD Num"] = pd.to_numeric(cand["ICD Num"], errors="coerce")
-    cand["is_gpcr"] = (cand["Num ICD"].fillna(0) > 4).astype(int)
+    # GPCRs are 7-pass transmembrane proteins with exactly 4 cytoplasmic domains
+    cand["is_gpcr"] = (cand["Num ICD"].fillna(0) == 4).astype(int)
 
     return cand
 

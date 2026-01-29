@@ -96,6 +96,7 @@ from .model import (
 from .dirichlet_multinomial import (
     DirichletMultinomialData,
     DirichletMultinomialResult,
+    eb_spike_slab_pip,
     fit_dm_model,
     prepare_dm_data,
     simulate_dm_data,
@@ -188,6 +189,7 @@ __all__ = [
     # dirichlet_multinomial
     "DirichletMultinomialData",
     "DirichletMultinomialResult",
+    "eb_spike_slab_pip",
     "fit_dm_model",
     "prepare_dm_data",
     "simulate_dm_data",

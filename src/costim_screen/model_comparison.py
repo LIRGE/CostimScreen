@@ -11,10 +11,10 @@ The comparison evaluates:
 4. Calibration of p-values
 
 Models compared:
-- Joint NB-GLM (src/costim_screen)
-- Mann-Whitney on residuals (Pooled-CAR-T-Analysis approach)
-- Per-phenotype NB-GLM (Costim-NBGLM-Pipeline approach)
-- Dirichlet-Multinomial (new principled model)
+- Joint NB-GLM: Single model with all phenotypes and ELM interactions
+- Mann-Whitney: Rank-based comparison on Pearson residuals
+- Per-phenotype NB-GLM: Pooled T-subset models with fixed dispersion
+- Dirichlet-Multinomial: Compositional model with PIP-based significance
 """
 from __future__ import annotations
 
@@ -479,7 +479,7 @@ def run_mann_whitney(
     data: DirichletMultinomialData,
     alpha: float = 0.05,
 ) -> MethodResult:
-    """Run Mann-Whitney approach (Pooled-CAR-T-Analysis style).
+    """Run Mann-Whitney approach.
 
     Computes Pearson residuals, then Mann-Whitney U comparing
     CCDs with vs without each ELM, separately per phenotype.
@@ -608,12 +608,12 @@ def run_per_phenotype_nb_glm(
     data: DirichletMultinomialData,
     alpha: float = 0.05,
 ) -> MethodResult:
-    """Run per-phenotype NB-GLM approach (Costim-NBGLM-Pipeline style).
+    """Run per-phenotype NB-GLM approach (pooled T-subset models).
 
     Fits separate NB-GLM for each phenotype:
     count ~ 1 + ELM1 + ELM2 + ...
 
-    Note: This approach does NOT use an offset, matching the original implementation.
+    Note: This approach does NOT use an offset.
     """
     start_time = time.time()
 

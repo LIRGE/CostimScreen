@@ -168,4 +168,12 @@ def split_elm_list(s: str) -> list[str]:
         return []
     raw = str(s).replace("|", ";").replace(",", ";")
     parts = [p.strip() for p in raw.split(";")]
-    return [p for p in parts if p]
+    # Strip surrounding quotes (single or double) from each element
+    cleaned = []
+    for p in parts:
+        if p:
+            # Remove surrounding quotes
+            p = p.strip("'\"")
+            if p:
+                cleaned.append(p)
+    return cleaned

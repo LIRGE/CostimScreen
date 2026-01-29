@@ -1,0 +1,7 @@
+,tpr_mean,tpr_mean,tpr_mean,tpr_mean,tpr_mean,tpr_mean,tpr_mean,tpr_mean,tpr_mean
+scenario,small_n_small_effect,small_n_medium_effect,small_n_large_effect,medium_n_small_effect,medium_n_medium_effect,medium_n_large_effect,large_n_small_effect,large_n_medium_effect,large_n_large_effect
+method,,,,,,,,,
+Dirichlet-Multinomial[pip],0.0,0.9,1.0,0.0,0.7,1.0,0.0,1.0,1.0
+Joint NB-GLM,0.0,0.6,0.5,0.0,0.6,0.9,0.4,1.0,1.0
+Mann-Whitney,0.4,1.0,1.0,0.8,1.0,1.0,0.9,1.0,1.0
+Per-Phenotype NB-GLM,0.0,0.2,0.2,0.0,0.3,0.8,0.2,0.8,1.0
