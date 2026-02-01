@@ -2,6 +2,8 @@
 
 A Python toolkit for analyzing pooled CAR-T costimulatory domain screens, from raw FASTQ files to statistical analysis using negative binomial GLMs, Dirichlet-multinomial models, and non-parametric tests.
 
+📖 **Documentation**: [https://costimscreen.readthedocs.io/en/latest/](https://costimscreen.readthedocs.io/en/latest/)
+
 ## Overview
 
 This toolkit analyzes how different **Costimulatory Cytoplasmic Domains (CCDs)** affect CAR-T cell phenotype distributions. Each CCD construct contains one or more **Eukaryotic Linear Motifs (ELMs)**—short functional sequence patterns that mediate protein interactions and signaling.
